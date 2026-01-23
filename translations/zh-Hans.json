@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "配置吉利银河",
+        "description": "请输入从吉利银河APP抓包获取的信息。\n\n获取方式：\n1. 使用抓包工具抓取吉利银河APP的请求\n2. 抓取 galaxy-user-api.geely.com 域名下的 refresh 或 login 请求\n3. 获取 refreshToken 值和 headers 中的 deviceSN 值\n\n详见: https://github.com/suyunkai/geely-galaxy-assistant",
+        "data": {
+          "refresh_token": "Refresh Token",
+          "device_sn": "设备序列号 (deviceSN)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接到服务器",
+      "invalid_auth": "认证失败，请检查Token是否正确或已过期",
+      "unknown": "未知错误"
+    },
+    "abort": {
+      "already_configured": "该车辆已配置"
+    }
+  }
+}

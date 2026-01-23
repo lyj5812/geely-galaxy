@@ -1,0 +1,12 @@
+{
+  "domain": "geely_galaxy",
+  "name": "吉利银河",
+  "codeowners": ["@bhw"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/suyunkai/geely-galaxy-assistant",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/bhw-ha/geely_galaxy/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}

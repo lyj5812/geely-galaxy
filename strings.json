@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "配置吉利银河",
+        "description": "请输入从吉利银河APP抓包获取的信息",
+        "data": {
+          "refresh_token": "Refresh Token",
+          "device_sn": "设备序列号 (deviceSN)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接到服务器",
+      "invalid_auth": "认证失败，请检查Token是否正确",
+      "unknown": "未知错误"
+    },
+    "abort": {
+      "already_configured": "该车辆已配置"
+    }
+  }
+}
