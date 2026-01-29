@@ -80,10 +80,22 @@ class GeelyGalaxyApi:
             self._session = None
 
     def _format_date(self) -> str:
-        """Format date for API request (GMT format)."""
+        """Format date for API request (GMT format).
+
+        不使用 strftime 的 %a/%b，因为它们依赖系统 locale，
+        在中文环境下会输出中文日期名称，导致签名错误。
+        JS 版本使用硬编码英文名称，这里保持一致。
+        """
+        _DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        _MONTHS = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ]
         now = datetime.now(timezone.utc)
         # 格式: Wed, 22 Jan 2025 08:30:00 GMT
-        return now.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        day_name = _DAYS[now.weekday()]
+        month_name = _MONTHS[now.month - 1]
+        return f"{day_name}, {now.day:02d} {month_name} {now.year} {now.hour:02d}:{now.minute:02d}:{now.second:02d} GMT"
 
     def _generate_uuid(self) -> str:
         """Generate UUID for request."""
@@ -179,28 +191,32 @@ class GeelyGalaxyApi:
             "x-ca-key": app_key,
             "ca_version": "1",
             "accept": "application/json; charset=utf-8",
+            "usetoken": "1",
             "x-ca-timestamp": timestamp,
             "x-ca-signature-headers": "x-ca-nonce,x-ca-timestamp,x-ca-key",
+            "x-refresh-token": "true",
             "content-type": "application/x-www-form-urlencoded; charset=utf-8",
             "user-agent": "ALIYUN-ANDROID-UA",
             "deviceSN": self._device_sn,
+            "txCookie": "",
             "appId": "galaxy-app",
             "appVersion": "1.39.0",
             "platform": "Android",
+            "Cache-Control": "no-cache",
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "gzip",
+            "token": self._token or "",
         }
-
-        if self._token:
-            headers["token"] = self._token
 
         # 根据 AppKey 设置不同的 host 和参数
         if app_key == APP_KEYS["user"]:
             headers["host"] = API_HOSTS["user"]
             headers["usetoken"] = "true"
             headers["taenantid"] = "569001701001"
+            headers["svcsid"] = ""
+            del headers["x-refresh-token"]
         else:
             headers["host"] = API_HOSTS["app"]
-            headers["usetoken"] = "1"
-            headers["x-refresh-token"] = "true"
 
         return headers
 
@@ -242,33 +258,38 @@ class GeelyGalaxyApi:
             "x-ca-key": app_key,
             "ca_version": "1",
             "accept": "application/json; charset=utf-8",
+            "usetoken": "1",
             "content-md5": content_md5,
             "x-ca-timestamp": timestamp,
             "x-ca-signature-headers": signature_headers,
             "x-refresh-token": "true",
             "user-agent": "ALIYUN-ANDROID-UA",
             "deviceSN": self._device_sn,
+            "txCookie": "",
             "appId": "galaxy-app",
             "appVersion": "1.39.0",
             "platform": "Android",
-            "content-type": "application/json; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "sweet_security_info": '{"appVersion":"1.27.0","platform":"android"}',
+            "methodtype": "6",
+            "contenttype": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "gzip",
+            "token": self._token or "",
         }
-
-        if self._token:
-            headers["token"] = self._token
 
         # 根据 AppKey 设置不同的 host
         if app_key == APP_KEYS["user"]:
             headers["host"] = API_HOSTS["user"]
             headers["usetoken"] = "true"
             headers["taenantid"] = "569001701001"
+            headers["svcsid"] = ""
             del headers["x-refresh-token"]
         elif app_key == APP_KEYS["vc"]:
             headers["host"] = API_HOSTS["vc"]
-            headers["usetoken"] = "1"
         else:
             headers["host"] = API_HOSTS["app"]
-            headers["usetoken"] = "1"
 
         return headers
 
@@ -371,9 +392,15 @@ class GeelyGalaxyApi:
             raise GeelyApiError("No VIN available")
 
         session = await self._ensure_session()
-        path = "/vc/app/v1/vehicle/status/query"
+        path = "/vc/app/v1/vehicle/control/status"
         url = f"https://{API_HOSTS['vc']}{path}"
-        body = json.dumps({"vin": vin}, separators=(",", ":"))
+        # JS 版本发送完整的请求体，包含 clientType、statusType、dataTypeList
+        body = json.dumps({
+            "clientType": 2,
+            "statusType": "local",
+            "dataTypeList": ["all"],
+            "vin": vin,
+        }, separators=(",", ":"))
         headers = self._build_post_headers(APP_KEYS["vc"], path, body)
 
         try:
