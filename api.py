@@ -7,7 +7,6 @@ https://github.com/suyunkai/geely-galaxy-assistant
 import hashlib
 import hmac
 import base64
-import time
 import uuid
 import json
 import logging
@@ -69,7 +68,11 @@ class GeelyGalaxyApi:
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """Ensure we have a valid session."""
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            # 禁用 cookie jar，避免跨请求 cookie 干扰 API 签名验证
+            # JS 版本不会在请求之间传递 cookie
+            self._session = aiohttp.ClientSession(
+                cookie_jar=aiohttp.DummyCookieJar()
+            )
             self._own_session = True
         return self._session
 
@@ -79,12 +82,17 @@ class GeelyGalaxyApi:
             await self._session.close()
             self._session = None
 
-    def _format_date(self) -> str:
-        """Format date for API request (GMT format).
+    def _format_date_and_timestamp(self) -> tuple[str, str]:
+        """Format date and timestamp for API request.
 
-        不使用 strftime 的 %a/%b，因为它们依赖系统 locale，
-        在中文环境下会输出中文日期名称，导致签名错误。
-        JS 版本使用硬编码英文名称，这里保持一致。
+        返回 (date_string, timestamp_string)，保证两者来自同一时刻。
+
+        JS 版本的实现逻辑：
+        1. 获取当前时间，格式化为 "Wed, 22 Jan 2025 08:30:00 GMT"
+        2. 将格式化后的字符串解析回 Date 对象
+        3. 用 getTime() 获取毫秒时间戳
+        由于格式化丢失了毫秒精度，JS 的时间戳总是以 000 结尾。
+        这里复现相同的行为。
         """
         _DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         _MONTHS = [
@@ -92,10 +100,12 @@ class GeelyGalaxyApi:
             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ]
         now = datetime.now(timezone.utc)
-        # 格式: Wed, 22 Jan 2025 08:30:00 GMT
         day_name = _DAYS[now.weekday()]
         month_name = _MONTHS[now.month - 1]
-        return f"{day_name}, {now.day:02d} {month_name} {now.year} {now.hour:02d}:{now.minute:02d}:{now.second:02d} GMT"
+        date_str = f"{day_name}, {now.day:02d} {month_name} {now.year} {now.hour:02d}:{now.minute:02d}:{now.second:02d} GMT"
+        # 与 JS 一致：截断到秒级精度再乘以 1000
+        timestamp = str(int(now.replace(microsecond=0).timestamp()) * 1000)
+        return date_str, timestamp
 
     def _generate_uuid(self) -> str:
         """Generate UUID for request."""
@@ -168,8 +178,7 @@ class GeelyGalaxyApi:
 
     def _build_get_headers(self, app_key: str, path: str) -> dict[str, str]:
         """Build GET request headers with signature."""
-        date = self._format_date()
-        timestamp = str(int(time.time() * 1000))
+        date, timestamp = self._format_date_and_timestamp()
         nonce = self._generate_uuid()
 
         signature = self._calculate_signature(
@@ -222,8 +231,7 @@ class GeelyGalaxyApi:
         self, app_key: str, path: str, body: str
     ) -> dict[str, str]:
         """Build POST request headers with signature."""
-        date = self._format_date()
-        timestamp = str(int(time.time() * 1000))
+        date, timestamp = self._format_date_and_timestamp()
         nonce = self._generate_uuid()
         content_md5 = self._calculate_content_md5(body)
 

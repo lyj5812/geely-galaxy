@@ -37,27 +37,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device_sn=entry.data[CONF_DEVICE_SN],
     )
 
+    # 缓存车辆信息，避免每次更新都调用 get_vehicle_list
+    cached_vin: str | None = None
+    cached_vehicle_info: dict = {}
+
     async def async_update_data():
         """Fetch data from API."""
+        nonlocal cached_vin, cached_vehicle_info
         try:
-            # 获取车辆列表
-            vehicles = await api.get_vehicle_list()
-            if not vehicles:
-                raise UpdateFailed("No vehicles found")
+            # 只在首次或缓存为空时获取车辆列表
+            if not cached_vin:
+                vehicles = await api.get_vehicle_list()
+                if not vehicles:
+                    raise UpdateFailed("No vehicles found")
+                cached_vehicle_info = vehicles[0]
+                cached_vin = cached_vehicle_info.get("vin")
 
-            vin = vehicles[0].get("vin")
-
-            # 获取车辆状态
-            vehicle_status = await api.get_vehicle_status(vin)
+            # 获取车辆状态（失败时不阻塞整个集成）
+            vehicle_status = {}
+            try:
+                vehicle_status = await api.get_vehicle_status(cached_vin)
+            except GeelyApiError as err:
+                _LOGGER.warning("获取车辆状态失败（将在下次更新时重试）: %s", err)
 
             # 获取开关状态
+            switch_status = {}
             try:
-                switch_status = await api.get_switch_status(vin)
+                switch_status = await api.get_switch_status(cached_vin)
             except GeelyApiError:
-                switch_status = {}
+                pass
 
             return {
-                "vehicle_info": vehicles[0],
+                "vehicle_info": cached_vehicle_info,
                 "vehicle_status": vehicle_status,
                 "switch_status": switch_status,
             }
