@@ -286,15 +286,18 @@ class GeelyGalaxyApi:
                 _LOGGER.debug("Refresh token response: %s", response_text)
 
                 if response.status != 200:
+                    _LOGGER.error("Refresh token HTTP %s: %s", response.status, response_text[:500])
                     raise GeelyAuthError(
-                        f"Failed to refresh token: {response.status}"
+                        f"Failed to refresh token: HTTP {response.status}"
                     )
 
                 data = json.loads(response_text)
+                code = data.get("code")
 
-                if data.get("code") != "success":
+                if code not in ("success", 0, "0"):
+                    _LOGGER.error("Refresh token failed: %s", response_text[:500])
                     raise GeelyAuthError(
-                        f"Token refresh failed: {data.get('message', 'Unknown error')}"
+                        f"Token refresh failed (code={code}): {data.get('message', 'Unknown error')}"
                     )
 
                 token_data = data.get("data", {}).get("centerTokenDto", {})
@@ -331,11 +334,16 @@ class GeelyGalaxyApi:
                 _LOGGER.debug("Vehicle list response: %s", response_text)
 
                 if response.status != 200:
-                    raise GeelyApiError(f"API request failed: {response.status}")
+                    _LOGGER.error("Vehicle list HTTP %s: %s", response.status, response_text[:500])
+                    raise GeelyApiError(f"API request failed: HTTP {response.status}")
 
                 data = json.loads(response_text)
-                if data.get("code") != 0:
-                    raise GeelyApiError(f"API error: {data.get('message')}")
+                code = data.get("code")
+                if code not in (0, "0", "success"):
+                    _LOGGER.error("Vehicle list failed: %s", response_text[:500])
+                    raise GeelyApiError(
+                        f"API error (code={code}): {data.get('message', response_text[:200])}"
+                    )
 
                 vehicles = data.get("data", [])
                 if vehicles:
@@ -374,11 +382,16 @@ class GeelyGalaxyApi:
                 _LOGGER.debug("Vehicle status response: %s", response_text)
 
                 if response.status != 200:
-                    raise GeelyApiError(f"API request failed: {response.status}")
+                    _LOGGER.error("Vehicle status HTTP %s: %s", response.status, response_text[:500])
+                    raise GeelyApiError(f"API request failed: HTTP {response.status}")
 
                 data = json.loads(response_text)
-                if data.get("code") != 0:
-                    raise GeelyApiError(f"API error: {data.get('message')}")
+                code = data.get("code")
+                if code not in (0, "0", "success"):
+                    _LOGGER.error("Vehicle status failed: %s", response_text[:500])
+                    raise GeelyApiError(
+                        f"API error (code={code}): {data.get('message', response_text[:200])}"
+                    )
 
                 return data.get("data", {})
 
@@ -413,11 +426,15 @@ class GeelyGalaxyApi:
                 _LOGGER.debug("Switch status response: %s", response_text)
 
                 if response.status != 200:
-                    raise GeelyApiError(f"API request failed: {response.status}")
+                    _LOGGER.error("Switch status HTTP %s: %s", response.status, response_text[:500])
+                    raise GeelyApiError(f"API request failed: HTTP {response.status}")
 
                 data = json.loads(response_text)
-                if data.get("code") != 0:
-                    raise GeelyApiError(f"API error: {data.get('message')}")
+                code = data.get("code")
+                if code not in (0, "0", "success"):
+                    raise GeelyApiError(
+                        f"API error (code={code}): {data.get('message', response_text[:200])}"
+                    )
 
                 return data.get("data", {})
 
