@@ -9,7 +9,6 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import GeelyGalaxyApi, GeelyApiError, GeelyAuthError
 from .const import (
@@ -30,28 +29,29 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """Validate the user input allows us to connect."""
-    session = async_get_clientsession(hass)
-
+    # 使用独立 session，不用 HA 共享 session，避免默认 headers/cookie 干扰 API 签名
     api = GeelyGalaxyApi(
         refresh_token=data[CONF_REFRESH_TOKEN],
         device_sn=data[CONF_DEVICE_SN],
-        session=session,
     )
 
-    if not await api.test_connection():
-        raise GeelyAuthError("Invalid credentials")
-
-    # 获取车辆信息用于标题
     try:
-        vehicles = await api.get_vehicle_list()
-        if vehicles:
-            model = vehicles[0].get("seriesNameVs", "吉利银河")
-            vin = vehicles[0].get("vin", "")
-            return {"title": f"{model}", "vin": vin}
-    except GeelyApiError:
-        pass
+        if not await api.test_connection():
+            raise GeelyAuthError("Invalid credentials")
 
-    return {"title": "吉利银河", "vin": ""}
+        # 获取车辆信息用于标题
+        try:
+            vehicles = await api.get_vehicle_list()
+            if vehicles:
+                model = vehicles[0].get("seriesNameVs", "吉利银河")
+                vin = vehicles[0].get("vin", "")
+                return {"title": f"{model}", "vin": vin}
+        except GeelyApiError:
+            pass
+
+        return {"title": "吉利银河", "vin": ""}
+    finally:
+        await api.close()
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):

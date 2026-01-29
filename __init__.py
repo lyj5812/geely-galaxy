@@ -12,7 +12,6 @@ from datetime import timedelta
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import GeelyGalaxyApi, GeelyApiError
@@ -32,12 +31,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Geely Galaxy from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    session = async_get_clientsession(hass)
-
+    # 使用独立 session，不用 HA 共享 session，避免默认 headers/cookie 干扰 API 签名
     api = GeelyGalaxyApi(
         refresh_token=entry.data[CONF_REFRESH_TOKEN],
         device_sn=entry.data[CONF_DEVICE_SN],
-        session=session,
     )
 
     async def async_update_data():
@@ -90,6 +87,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
+        entry_data = hass.data[DOMAIN].pop(entry.entry_id)
+        # 关闭独立 session
+        await entry_data["api"].close()
 
     return unload_ok
