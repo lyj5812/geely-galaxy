@@ -208,15 +208,13 @@ class GeelyGalaxyApi:
             "token": self._token or "",
         }
 
-        # 根据 AppKey 设置不同的 host 和参数
+        # 根据 AppKey 设置不同的参数
+        # 注意：不手动设置 host header，aiohttp 会根据 URL 自动设置
         if app_key == APP_KEYS["user"]:
-            headers["host"] = API_HOSTS["user"]
             headers["usetoken"] = "true"
             headers["taenantid"] = "569001701001"
             headers["svcsid"] = ""
             del headers["x-refresh-token"]
-        else:
-            headers["host"] = API_HOSTS["app"]
 
         return headers
 
@@ -279,17 +277,13 @@ class GeelyGalaxyApi:
             "token": self._token or "",
         }
 
-        # 根据 AppKey 设置不同的 host
+        # 根据 AppKey 设置不同的参数
+        # 注意：不手动设置 host header，aiohttp 会根据 URL 自动设置
         if app_key == APP_KEYS["user"]:
-            headers["host"] = API_HOSTS["user"]
             headers["usetoken"] = "true"
             headers["taenantid"] = "569001701001"
             headers["svcsid"] = ""
             del headers["x-refresh-token"]
-        elif app_key == APP_KEYS["vc"]:
-            headers["host"] = API_HOSTS["vc"]
-        else:
-            headers["host"] = API_HOSTS["app"]
 
         return headers
 
@@ -301,6 +295,7 @@ class GeelyGalaxyApi:
         url = f"https://{API_HOSTS['user']}{path}"
         headers = self._build_get_headers(APP_KEYS["user"], path)
 
+        _LOGGER.debug("Calling refresh_access_token: %s", url)
         try:
             async with session.get(url, headers=headers) as response:
                 response_text = await response.text()
@@ -318,7 +313,7 @@ class GeelyGalaxyApi:
                 if code not in ("success", 0, "0"):
                     _LOGGER.error("Refresh token failed: %s", response_text[:500])
                     raise GeelyAuthError(
-                        f"Token refresh failed (code={code}): {data.get('message', 'Unknown error')}"
+                        f"Token refresh failed (code={code}): {data.get('msg', data.get('message', 'Unknown error'))}"
                     )
 
                 token_data = data.get("data", {}).get("centerTokenDto", {})
@@ -349,6 +344,7 @@ class GeelyGalaxyApi:
         body = json.dumps({}, separators=(",", ":"))
         headers = self._build_post_headers(APP_KEYS["vc"], path, body)
 
+        _LOGGER.debug("Calling get_vehicle_list: %s, body=%s", url, body)
         try:
             async with session.post(url, data=body, headers=headers) as response:
                 response_text = await response.text()
@@ -363,7 +359,7 @@ class GeelyGalaxyApi:
                 if code not in (0, "0", "success"):
                     _LOGGER.error("Vehicle list failed: %s", response_text[:500])
                     raise GeelyApiError(
-                        f"API error (code={code}): {data.get('message', response_text[:200])}"
+                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
                     )
 
                 vehicles = data.get("data", [])
@@ -403,6 +399,7 @@ class GeelyGalaxyApi:
         }, separators=(",", ":"))
         headers = self._build_post_headers(APP_KEYS["vc"], path, body)
 
+        _LOGGER.debug("Calling get_vehicle_status: %s, vin=%s", url, vin)
         try:
             async with session.post(url, data=body, headers=headers) as response:
                 response_text = await response.text()
@@ -417,7 +414,7 @@ class GeelyGalaxyApi:
                 if code not in (0, "0", "success"):
                     _LOGGER.error("Vehicle status failed: %s", response_text[:500])
                     raise GeelyApiError(
-                        f"API error (code={code}): {data.get('message', response_text[:200])}"
+                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
                     )
 
                 return data.get("data", {})
@@ -447,6 +444,7 @@ class GeelyGalaxyApi:
         body = json.dumps({"vin": vin}, separators=(",", ":"))
         headers = self._build_post_headers(APP_KEYS["vc"], path, body)
 
+        _LOGGER.debug("Calling get_switch_status: %s, vin=%s", url, vin)
         try:
             async with session.post(url, data=body, headers=headers) as response:
                 response_text = await response.text()
@@ -460,7 +458,7 @@ class GeelyGalaxyApi:
                 code = data.get("code")
                 if code not in (0, "0", "success"):
                     raise GeelyApiError(
-                        f"API error (code={code}): {data.get('message', response_text[:200])}"
+                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
                     )
 
                 return data.get("data", {})
