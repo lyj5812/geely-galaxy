@@ -6,6 +6,7 @@ https://github.com/suyunkai/geely-galaxy-assistant
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
@@ -53,12 +54,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 cached_vehicle_info = vehicles[0]
                 cached_vin = cached_vehicle_info.get("vin")
 
+            # API 调用之间添加延迟，避免服务端限流
+            await asyncio.sleep(2)
+
             # 获取车辆状态（失败时不阻塞整个集成）
             vehicle_status = {}
             try:
                 vehicle_status = await api.get_vehicle_status(cached_vin)
             except GeelyApiError as err:
                 _LOGGER.warning("获取车辆状态失败（将在下次更新时重试）: %s", err)
+
+            await asyncio.sleep(1)
 
             # 获取开关状态
             switch_status = {}

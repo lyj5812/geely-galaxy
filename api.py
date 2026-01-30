@@ -68,11 +68,8 @@ class GeelyGalaxyApi:
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """Ensure we have a valid session."""
         if self._session is None:
-            # 禁用 cookie jar，避免跨请求 cookie 干扰 API 签名验证
-            # JS 版本不会在请求之间传递 cookie
-            self._session = aiohttp.ClientSession(
-                cookie_jar=aiohttp.DummyCookieJar()
-            )
+            # JS 版本使用 tough-cookie（正常 cookie jar），cookie 在请求间传递
+            self._session = aiohttp.ClientSession()
             self._own_session = True
         return self._session
 
@@ -217,10 +214,10 @@ class GeelyGalaxyApi:
             "token": self._token or "",
         }
 
-        # 根据 AppKey 设置不同的参数
-        # 注意：不手动设置 host header，aiohttp 会根据 URL 自动设置
+        # 根据 AppKey 设置不同的参数（与 JS getGetHeader 一致）
         if app_key == APP_KEYS["user"]:
             headers["usetoken"] = "true"
+            headers["host"] = API_HOSTS["user"]
             headers["taenantid"] = "569001701001"
             headers["svcsid"] = ""
             del headers["x-refresh-token"]
@@ -285,13 +282,17 @@ class GeelyGalaxyApi:
             "token": self._token or "",
         }
 
-        # 根据 AppKey 设置不同的参数
-        # 注意：不手动设置 host header，aiohttp 会根据 URL 自动设置
+        # 根据 AppKey 设置不同的参数（与 JS getPostHeader 一致）
         if app_key == APP_KEYS["user"]:
             headers["usetoken"] = "true"
+            headers["host"] = API_HOSTS["user"]
             headers["taenantid"] = "569001701001"
             headers["svcsid"] = ""
             del headers["x-refresh-token"]
+        elif app_key == APP_KEYS["vc"]:
+            headers["host"] = API_HOSTS["vc"]
+        else:
+            headers["host"] = API_HOSTS["app"]
 
         return headers
 
@@ -378,27 +379,11 @@ class GeelyGalaxyApi:
         except aiohttp.ClientError as err:
             raise GeelyApiError(f"Connection error: {err}") from err
 
-    async def get_vehicle_status(self, vin: str | None = None) -> dict[str, Any]:
-        """Get vehicle status."""
-        if not self._token:
-            await self.refresh_access_token()
-
-        if not vin and self._vehicle_info:
-            vin = self._vehicle_info.get("vin")
-
-        if not vin:
-            # 先获取车辆列表
-            vehicles = await self.get_vehicle_list()
-            if vehicles:
-                vin = vehicles[0].get("vin")
-
-        if not vin:
-            raise GeelyApiError("No VIN available")
-
+    async def _call_vehicle_status(self, vin: str) -> dict[str, Any]:
+        """Internal: make vehicle status API call."""
         session = await self._ensure_session()
         path = "/vc/app/v1/vehicle/control/status"
         url = f"https://{API_HOSTS['vc']}{path}"
-        # JS 版本发送完整的请求体，包含 clientType、statusType、dataTypeList
         body = json.dumps({
             "clientType": 2,
             "statusType": "local",
@@ -408,27 +393,53 @@ class GeelyGalaxyApi:
         headers = self._build_post_headers(APP_KEYS["vc"], path, body)
 
         _LOGGER.debug("Calling get_vehicle_status: %s, vin=%s", url, vin)
+        async with session.post(url, data=body, headers=headers) as response:
+            response_text = await response.text()
+            _LOGGER.debug("Vehicle status response: %s", response_text)
+
+            if response.status != 200:
+                _LOGGER.error("Vehicle status HTTP %s: %s", response.status, response_text[:500])
+                raise GeelyApiError(f"API request failed: HTTP {response.status}")
+
+            data = json.loads(response_text)
+            code = data.get("code")
+            if code not in (0, "0", "success"):
+                _LOGGER.error("Vehicle status failed: %s", response_text[:500])
+                raise GeelyApiError(
+                    f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
+                )
+
+            return data.get("data") or {}
+
+    async def get_vehicle_status(self, vin: str | None = None) -> dict[str, Any]:
+        """Get vehicle status with retry on failure."""
+        import asyncio
+
+        if not self._token:
+            await self.refresh_access_token()
+
+        if not vin and self._vehicle_info:
+            vin = self._vehicle_info.get("vin")
+
+        if not vin:
+            vehicles = await self.get_vehicle_list()
+            if vehicles:
+                vin = vehicles[0].get("vin")
+
+        if not vin:
+            raise GeelyApiError("No VIN available")
+
         try:
-            async with session.post(url, data=body, headers=headers) as response:
-                response_text = await response.text()
-                _LOGGER.debug("Vehicle status response: %s", response_text)
-
-                if response.status != 200:
-                    _LOGGER.error("Vehicle status HTTP %s: %s", response.status, response_text[:500])
-                    raise GeelyApiError(f"API request failed: HTTP {response.status}")
-
-                data = json.loads(response_text)
-                code = data.get("code")
-                if code not in (0, "0", "success"):
-                    _LOGGER.error("Vehicle status failed: %s", response_text[:500])
-                    raise GeelyApiError(
-                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
-                    )
-
-                return data.get("data", {})
-
-        except aiohttp.ClientError as err:
-            raise GeelyApiError(f"Connection error: {err}") from err
+            return await self._call_vehicle_status(vin)
+        except GeelyApiError:
+            # B00000 可能是 token 失效或服务端限流，刷新 token 后延迟重试
+            _LOGGER.info("车辆状态首次请求失败，刷新 token 后重试...")
+            await self.refresh_access_token()
+            await asyncio.sleep(2)
+            try:
+                return await self._call_vehicle_status(vin)
+            except aiohttp.ClientError as err:
+                raise GeelyApiError(f"Connection error: {err}") from err
 
     async def get_switch_status(self, vin: str | None = None) -> dict[str, Any]:
         """Get vehicle switch status (sentry mode, etc)."""
@@ -449,7 +460,11 @@ class GeelyGalaxyApi:
         session = await self._ensure_session()
         path = "/vc/app/v1/vehicle/switch/status"
         url = f"https://{API_HOSTS['vc']}{path}"
-        body = json.dumps({"vin": vin}, separators=(",", ":"))
+        body = json.dumps({
+            "clientType": 2,
+            "udid": None,
+            "vin": vin,
+        }, separators=(",", ":"))
         headers = self._build_post_headers(APP_KEYS["vc"], path, body)
 
         _LOGGER.debug("Calling get_switch_status: %s, vin=%s", url, vin)
@@ -469,7 +484,7 @@ class GeelyGalaxyApi:
                         f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
                     )
 
-                return data.get("data", {})
+                return data.get("data") or {}
 
         except aiohttp.ClientError as err:
             raise GeelyApiError(f"Connection error: {err}") from err
