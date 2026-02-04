@@ -23,6 +23,7 @@ APP_SECRETS = {
     "204167276": "5XfsfFBrUEF0fFiAUmAFFQ6lmhje3iMZ",
     "204168364": "NqYVmMgH5HXol8RB8RkOpl8iLCBakdRo",
     "204179735": "UhmsX3xStU4vrGHGYtqEXahtkYuQncMf",
+    "204195485": "CqPwP83wzdjesmLeDuzK6SljsYN5PvRM",  # 充电服务 API
 }
 
 # API 域名配置
@@ -30,6 +31,7 @@ API_HOSTS = {
     "user": "galaxy-user-api.geely.com",
     "app": "galaxy-app.geely.com",
     "vc": "galaxy-vc.geely.com",
+    "recharge": "api-recharge.geely.com",  # 充电桩服务
 }
 
 # AppKey 配置
@@ -37,6 +39,13 @@ APP_KEYS = {
     "user": "204179735",  # 用户API
     "app": "204167276",   # H5端应用API
     "vc": "204373120",    # 车辆控制API
+    "recharge": "204195485",  # 充电桩服务 API
+}
+
+# 充电服务配置
+RECHARGE_CONFIG = {
+    "channel_id": "01701001",
+    "oauth_client_id": "30000023",
 }
 
 
@@ -62,8 +71,10 @@ class GeelyGalaxyApi:
         self._device_sn = device_sn
         self._session = session
         self._token: str | None = None
+        self._recharge_auth_token: str | None = None  # 充电服务 authToken
         self._own_session = False
         self._vehicle_info: dict = {}
+        self._piling_code: str | None = None  # 缓存充电桩编码
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """Ensure we have a valid session."""
@@ -683,3 +694,313 @@ class GeelyGalaxyApi:
     def vehicle_info(self) -> dict[str, Any]:
         """Get cached vehicle info."""
         return self._vehicle_info
+
+    # ========== 充电桩服务 API (api-recharge.geely.com) ==========
+
+    def _sort_query_params(self, path: str) -> str:
+        """将 URL 参数按字母顺序排序（签名需要）。"""
+        if '?' not in path:
+            return path
+        base, query = path.split('?', 1)
+        params = query.split('&')
+        params.sort()
+        return f"{base}?{'&'.join(params)}"
+
+    def _calculate_recharge_signature(
+        self,
+        method: str,
+        accept: str,
+        content_md5: str,
+        content_type: str,
+        date: str,
+        app_key: str,
+        nonce: str,
+        timestamp: str,
+        path: str,
+    ) -> str:
+        """计算充电服务 API 签名（参数需排序）。"""
+        sorted_path = self._sort_query_params(path)
+        string_to_sign = f"{method}\n{accept}\n{content_md5}\n{content_type}\n{date}\n"
+        string_to_sign += f"x-ca-key:{app_key}\nx-ca-nonce:{nonce}\nx-ca-timestamp:{timestamp}\n{sorted_path}"
+
+        secret = APP_SECRETS.get(app_key)
+        if not secret:
+            raise GeelyApiError(f"Unknown AppKey: {app_key}")
+
+        signature = hmac.new(
+            secret.encode("utf-8"),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+
+        return base64.b64encode(signature).decode("utf-8")
+
+    def _build_recharge_headers(
+        self, method: str, path: str, body: str | None = None
+    ) -> dict[str, str]:
+        """构建充电服务 API 请求头。"""
+        date, timestamp = self._format_date_and_timestamp()
+        nonce = self._generate_uuid()
+        app_key = APP_KEYS["recharge"]
+
+        content_md5 = ""
+        if body:
+            content_md5 = self._calculate_content_md5(body)
+
+        ct = "application/json; charset=utf-8" if method == "POST" else "application/x-www-form-urlencoded; charset=utf-8"
+
+        signature = self._calculate_recharge_signature(
+            method=method,
+            accept="application/json; charset=utf-8",
+            content_md5=content_md5,
+            content_type=ct,
+            date=date,
+            app_key=app_key,
+            nonce=nonce,
+            timestamp=timestamp,
+            path=path,
+        )
+
+        headers = {
+            "channelid": RECHARGE_CONFIG["channel_id"],
+            "accept": "application/json; charset=utf-8",
+            "date": date,
+            "x-ca-timestamp": timestamp,
+            "x-ca-nonce": nonce,
+            "user-agent": "ALIYUN-ANDROID-UA",
+            "x-ca-key": app_key,
+            "ca_version": "1",
+            "x-ca-signature-headers": "x-ca-key,x-ca-nonce,x-ca-timestamp",
+            "x-ca-signature": signature,
+            "host": API_HOSTS["recharge"],
+            "content-type": ct,
+        }
+
+        if content_md5:
+            headers["content-md5"] = content_md5
+
+        if self._recharge_auth_token:
+            headers["x-auth-token"] = self._recharge_auth_token
+            headers["token"] = self._recharge_auth_token
+        else:
+            headers["token"] = ""
+
+        return headers
+
+    async def get_oauth_code(self) -> str:
+        """获取充电服务的 OAuth 授权码。"""
+        if not self._token:
+            await self.refresh_access_token()
+
+        session = await self._ensure_session()
+        path = f"/api/v1/oauth2/code?scope=snsapiUserinfo&response_type=code&isDestruction=false&state=1&client_id={RECHARGE_CONFIG['oauth_client_id']}"
+        url = f"https://{API_HOSTS['user']}{path}"
+        headers = self._build_get_headers(APP_KEYS["user"], path)
+
+        _LOGGER.debug("Calling get_oauth_code: %s", url)
+        try:
+            async with session.get(url, headers=headers) as response:
+                response_text = await response.text()
+                _LOGGER.debug("OAuth code response: %s", response_text)
+
+                if response.status != 200:
+                    raise GeelyApiError(f"OAuth code request failed: HTTP {response.status}")
+
+                data = json.loads(response_text)
+                if data.get("code") != "success":
+                    raise GeelyApiError(f"OAuth code failed: {data.get('msg', response_text[:200])}")
+
+                oauth_code = data.get("data", {}).get("code")
+                if not oauth_code:
+                    raise GeelyApiError("No OAuth code in response")
+
+                return oauth_code
+
+        except aiohttp.ClientError as err:
+            raise GeelyApiError(f"Connection error: {err}") from err
+
+    async def get_recharge_auth_token(self) -> str:
+        """使用 OAuth 码换取充电服务 authToken。"""
+        oauth_code = await self.get_oauth_code()
+
+        session = await self._ensure_session()
+        path = f"/login/auth-token?code={oauth_code}"
+        url = f"https://{API_HOSTS['recharge']}{path}"
+        headers = self._build_recharge_headers("GET", path)
+
+        _LOGGER.debug("Calling get_recharge_auth_token: %s", url)
+        try:
+            async with session.get(url, headers=headers) as response:
+                response_text = await response.text()
+                _LOGGER.debug("Recharge auth token response: %s", response_text)
+
+                if response.status != 200:
+                    raise GeelyApiError(f"Auth token request failed: HTTP {response.status}")
+
+                data = json.loads(response_text)
+                code = data.get("code")
+                if code not in (0, "0", 1, "1", 200, "200", "success", "SUCCESS"):
+                    raise GeelyApiError(f"Auth token failed (code={code}): {data.get('msg', response_text[:200])}")
+
+                # data 可能是数组或对象
+                result = data.get("data")
+                auth_token = None
+                if isinstance(result, list) and len(result) > 0:
+                    auth_token = result[0].get("authToken")
+                elif isinstance(result, dict):
+                    auth_token = result.get("authToken")
+
+                if not auth_token:
+                    raise GeelyApiError("No authToken in response")
+
+                self._recharge_auth_token = auth_token
+                _LOGGER.info("Recharge auth token obtained successfully")
+                return auth_token
+
+        except aiohttp.ClientError as err:
+            raise GeelyApiError(f"Connection error: {err}") from err
+
+    async def _ensure_recharge_auth(self) -> None:
+        """确保有有效的充电服务 authToken。"""
+        if not self._recharge_auth_token:
+            await self.get_recharge_auth_token()
+
+    async def _recharge_post(self, path: str, body_dict: dict) -> dict[str, Any]:
+        """充电服务 POST 请求。"""
+        await self._ensure_recharge_auth()
+
+        session = await self._ensure_session()
+        url = f"https://{API_HOSTS['recharge']}{path}"
+        body = json.dumps(body_dict, separators=(",", ":"))
+        headers = self._build_recharge_headers("POST", path, body)
+
+        _LOGGER.debug("recharge POST %s body=%s", path, body)
+        try:
+            async with session.post(url, data=body, headers=headers) as response:
+                response_text = await response.text()
+                _LOGGER.debug("recharge POST %s response: %s", path, response_text[:500])
+
+                if response.status != 200:
+                    raise GeelyApiError(f"API request failed: HTTP {response.status}")
+
+                data = json.loads(response_text)
+                code = data.get("code")
+                if code not in (0, "0", 1, "1", 200, "200", "success", "SUCCESS"):
+                    raise GeelyApiError(
+                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
+                    )
+
+                return data.get("data") or {}
+
+        except aiohttp.ClientError as err:
+            raise GeelyApiError(f"Connection error: {err}") from err
+
+    async def get_home_charger_list(self) -> list[dict[str, Any]]:
+        """获取家用充电桩列表。"""
+        try:
+            result = await self._recharge_post("/app/hcharger/getMyPilingsNew", {})
+            if isinstance(result, list) and result:
+                self._piling_code = result[0].get("pilingsCode")
+                return result
+            return []
+        except GeelyApiError as err:
+            _LOGGER.debug("获取充电桩列表失败: %s", err)
+            return []
+
+    async def get_home_charger_status(self, piling_code: str | None = None) -> dict[str, Any]:
+        """查询家用充电桩状态。"""
+        code = piling_code or self._piling_code
+        if not code:
+            chargers = await self.get_home_charger_list()
+            if chargers:
+                code = chargers[0].get("pilingsCode")
+        if not code:
+            _LOGGER.debug("无可用充电桩")
+            return {}
+
+        try:
+            return await self._recharge_post("/app/hcharger/queryEquipStatus", {"pilingsCode": code})
+        except GeelyApiError as err:
+            _LOGGER.debug("查询充电桩状态失败: %s", err)
+            return {}
+
+    async def get_home_charger_charging_data(self, piling_code: str | None = None) -> dict[str, Any]:
+        """获取充电中的实时数据。"""
+        code = piling_code or self._piling_code
+        if not code:
+            return {}
+
+        try:
+            return await self._recharge_post("/app/hcharger/getChargingData", {"pilingsCode": code})
+        except GeelyApiError as err:
+            _LOGGER.debug("获取充电数据失败: %s", err)
+            return {}
+
+    async def get_home_charger_records(
+        self, piling_code: str | None = None, page: int = 1, page_size: int = 10
+    ) -> dict[str, Any]:
+        """获取家用充电桩充电记录。"""
+        code = piling_code or self._piling_code
+        if not code:
+            return {}
+
+        try:
+            return await self._recharge_post("/app/hcharger/getMyChargeRecordByPage", {
+                "pageNumber": page,
+                "pageSize": page_size,
+                "pilingsCode": code,
+            })
+        except GeelyApiError as err:
+            _LOGGER.debug("获取充电记录失败: %s", err)
+            return {}
+
+    async def get_home_charger_detail(self, piling_code: str | None = None) -> dict[str, Any]:
+        """获取家用充电桩详情。"""
+        code = piling_code or self._piling_code
+        if not code:
+            return {}
+
+        try:
+            return await self._recharge_post("/app/hcharger/getPlingsDetailNew", {"pilingsCode": code})
+        except GeelyApiError as err:
+            _LOGGER.debug("获取充电桩详情失败: %s", err)
+            return {}
+
+    async def get_home_charger_last_record(self, piling_code: str | None = None) -> dict[str, Any]:
+        """获取最后一条充电记录。"""
+        code = piling_code or self._piling_code
+        if not code:
+            return {}
+
+        try:
+            return await self._recharge_post("/app/hcharger/queryLastRecord", {"pilingsCode": code})
+        except GeelyApiError as err:
+            _LOGGER.debug("获取最后充电记录失败: %s", err)
+            return {}
+
+    async def start_home_charger(self, piling_code: str | None = None) -> dict[str, Any]:
+        """启动家用充电桩充电。"""
+        code = piling_code or self._piling_code
+        if not code:
+            raise GeelyApiError("无可用充电桩")
+
+        return await self._recharge_post("/app/hcharger/startCharge", {
+            "type": "0",
+            "pilingsCode": code,
+            "reqId": "",
+        })
+
+    async def stop_home_charger(self, piling_code: str | None = None) -> dict[str, Any]:
+        """停止家用充电桩充电。"""
+        code = piling_code or self._piling_code
+        if not code:
+            raise GeelyApiError("无可用充电桩")
+
+        return await self._recharge_post("/app/hcharger/stopCharge", {
+            "pilingsCode": code,
+        })
+
+    @property
+    def piling_code(self) -> str | None:
+        """Get cached piling code."""
+        return self._piling_code

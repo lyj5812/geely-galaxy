@@ -138,6 +138,34 @@ class GeelyBaseSensor(CoordinatorEntity, SensorEntity):
             return {}
         return self.coordinator.data.get("reservation_info", {})
 
+    @property
+    def home_charger_list(self) -> list[dict[str, Any]]:
+        """Get home charger list from coordinator data."""
+        if not self.coordinator.data:
+            return []
+        return self.coordinator.data.get("home_charger_list", [])
+
+    @property
+    def home_charger_status(self) -> dict[str, Any]:
+        """Get home charger status from coordinator data."""
+        if not self.coordinator.data:
+            return {}
+        return self.coordinator.data.get("home_charger_status", {})
+
+    @property
+    def home_charger_charging_data(self) -> dict[str, Any]:
+        """Get home charger charging data from coordinator data."""
+        if not self.coordinator.data:
+            return {}
+        return self.coordinator.data.get("home_charger_charging_data", {})
+
+    @property
+    def home_charger_last_record(self) -> dict[str, Any]:
+        """Get home charger last record from coordinator data."""
+        if not self.coordinator.data:
+            return {}
+        return self.coordinator.data.get("home_charger_last_record", {})
+
 
 class GeelyVehicleModelSensor(GeelyBaseSensor):
     """Sensor for vehicle model."""
@@ -490,7 +518,29 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
     @property
     def native_value(self) -> str | None:
         """Return the charging status."""
-        # 从 last_soc 获取充电状态
+        # 优先从家用充电桩状态获取
+        charger_status = self.home_charger_status
+        if charger_status:
+            # 充电桩状态字段可能是 chargeStatus, workStatus, equipStatus 等
+            status = charger_status.get("chargeStatus") or charger_status.get("workStatus") or charger_status.get("equipStatus")
+            if status is not None:
+                status_map = {
+                    0: "空闲",
+                    1: "充电中",
+                    2: "充电完成",
+                    3: "故障",
+                    "0": "空闲",
+                    "1": "充电中",
+                    "2": "充电完成",
+                    "3": "故障",
+                    "idle": "空闲",
+                    "charging": "充电中",
+                    "finished": "充电完成",
+                    "fault": "故障",
+                }
+                return status_map.get(status, f"状态({status})")
+
+        # 回退到 last_soc 数据
         soc_data = self.last_soc
         charging_status = soc_data.get("chargingStatus") or soc_data.get("chargeStatus")
         if charging_status is not None:
@@ -510,17 +560,24 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
     @property
     def icon(self) -> str:
         """Return icon based on charging status."""
-        if self.native_value == "充电中":
+        if self.native_value in ("充电中",):
             return "mdi:battery-charging"
-        elif self.native_value == "充电完成":
+        elif self.native_value in ("充电完成",):
             return "mdi:battery-check"
         return "mdi:ev-station"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        soc_data = self.last_soc
         attrs = {}
+        # 家用充电桩数据
+        charger_status = self.home_charger_status
+        if charger_status:
+            for key in ["pilingsCode", "onlineStatus", "updateTime"]:
+                if key in charger_status and charger_status[key]:
+                    attrs[key] = charger_status[key]
+        # last_soc 数据
+        soc_data = self.last_soc
         if soc_data:
             if "soc" in soc_data:
                 attrs["soc"] = soc_data["soc"]
@@ -546,6 +603,21 @@ class GeelyChargingPowerSensor(GeelyBaseSensor):
     @property
     def native_value(self) -> float | None:
         """Return the charging power."""
+        # 优先从家用充电桩充电数据获取
+        charging_data = self.home_charger_charging_data
+        if charging_data:
+            power = charging_data.get("power") or charging_data.get("chargingPower") or charging_data.get("realPower")
+            if power is not None:
+                return round(float(power), 2)
+
+        # 也检查充电桩状态
+        charger_status = self.home_charger_status
+        if charger_status:
+            power = charger_status.get("power") or charger_status.get("chargingPower")
+            if power is not None:
+                return round(float(power), 2)
+
+        # 回退到 last_soc
         soc_data = self.last_soc
         power = soc_data.get("chargingPower") or soc_data.get("power")
         if power is not None:
@@ -570,6 +642,21 @@ class GeelyChargingVoltageSensor(GeelyBaseSensor):
     @property
     def native_value(self) -> float | None:
         """Return the charging voltage."""
+        # 优先从家用充电桩充电数据获取
+        charging_data = self.home_charger_charging_data
+        if charging_data:
+            voltage = charging_data.get("voltage") or charging_data.get("chargingVoltage") or charging_data.get("realVoltage")
+            if voltage is not None:
+                return round(float(voltage), 1)
+
+        # 也检查充电桩状态
+        charger_status = self.home_charger_status
+        if charger_status:
+            voltage = charger_status.get("voltage") or charger_status.get("chargingVoltage")
+            if voltage is not None:
+                return round(float(voltage), 1)
+
+        # 回退到 last_soc
         soc_data = self.last_soc
         voltage = soc_data.get("voltage") or soc_data.get("chargingVoltage")
         if voltage is not None:
@@ -594,6 +681,21 @@ class GeelyChargingCurrentSensor(GeelyBaseSensor):
     @property
     def native_value(self) -> float | None:
         """Return the charging current."""
+        # 优先从家用充电桩充电数据获取
+        charging_data = self.home_charger_charging_data
+        if charging_data:
+            current = charging_data.get("current") or charging_data.get("chargingCurrent") or charging_data.get("realCurrent") or charging_data.get("currentA")
+            if current is not None:
+                return round(float(current), 1)
+
+        # 也检查充电桩状态
+        charger_status = self.home_charger_status
+        if charger_status:
+            current = charger_status.get("current") or charger_status.get("chargingCurrent") or charger_status.get("currentA")
+            if current is not None:
+                return round(float(current), 1)
+
+        # 回退到 last_soc
         soc_data = self.last_soc
         current = soc_data.get("current") or soc_data.get("chargingCurrent")
         if current is not None:
@@ -618,6 +720,14 @@ class GeelyLastChargeSocSensor(GeelyBaseSensor):
     @property
     def native_value(self) -> int | None:
         """Return the last charge SOC."""
+        # 优先从家用充电桩最后记录获取
+        last_record = self.home_charger_last_record
+        if last_record:
+            soc = last_record.get("endSoc") or last_record.get("soc") or last_record.get("chargeLevel")
+            if soc is not None:
+                return int(soc)
+
+        # 回退到 last_soc
         soc_data = self.last_soc
         soc = soc_data.get("soc") or soc_data.get("chargeLevel")
         if soc is not None:
@@ -685,6 +795,14 @@ class GeelyLastChargeEnergySensor(GeelyBaseSensor):
     @property
     def native_value(self) -> float | None:
         """Return the last charge energy."""
+        # 优先从家用充电桩最后记录获取
+        last_record = self.home_charger_last_record
+        if last_record:
+            energy = last_record.get("chargeEnergy") or last_record.get("energy") or last_record.get("totalEnergy") or last_record.get("chargeCapacity")
+            if energy is not None:
+                return round(float(energy), 2)
+
+        # 回退到车辆充电记录
         records = self.charge_records
         if not records:
             return None
@@ -704,6 +822,18 @@ class GeelyLastChargeEnergySensor(GeelyBaseSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
+        attrs = {}
+
+        # 优先从家用充电桩最后记录获取
+        last_record = self.home_charger_last_record
+        if last_record:
+            for key in ["startTime", "endTime", "startSoc", "endSoc", "duration", "chargeType", "pilingsCode"]:
+                if key in last_record and last_record[key]:
+                    attrs[key] = last_record[key]
+            if attrs:
+                return attrs
+
+        # 回退到车辆充电记录
         records = self.charge_records
         if not records:
             return {}
@@ -713,7 +843,6 @@ class GeelyLastChargeEnergySensor(GeelyBaseSensor):
             return {}
 
         latest = record_list[0] if record_list else {}
-        attrs = {}
         for key in ["startTime", "endTime", "startSoc", "endSoc", "duration", "chargeType", "stationName"]:
             if key in latest and latest[key]:
                 attrs[key] = latest[key]

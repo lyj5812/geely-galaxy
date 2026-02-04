@@ -98,6 +98,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except GeelyApiError:
                 pass
 
+            # 获取家用充电桩数据
+            home_charger_list = []
+            home_charger_status = {}
+            home_charger_charging_data = {}
+            home_charger_last_record = {}
+
+            await asyncio.sleep(1)
+
+            try:
+                home_charger_list = await api.get_home_charger_list()
+                _LOGGER.debug("家用充电桩列表: %s", home_charger_list)
+            except GeelyApiError as err:
+                _LOGGER.debug("获取家用充电桩列表失败: %s", err)
+
+            if home_charger_list:
+                await asyncio.sleep(1)
+                try:
+                    home_charger_status = await api.get_home_charger_status()
+                    _LOGGER.debug("家用充电桩状态: %s", home_charger_status)
+                except GeelyApiError as err:
+                    _LOGGER.debug("获取家用充电桩状态失败: %s", err)
+
+                await asyncio.sleep(1)
+                try:
+                    home_charger_charging_data = await api.get_home_charger_charging_data()
+                    _LOGGER.debug("家用充电桩充电数据: %s", home_charger_charging_data)
+                except GeelyApiError as err:
+                    _LOGGER.debug("获取家用充电桩充电数据失败: %s", err)
+
+                await asyncio.sleep(1)
+                try:
+                    home_charger_last_record = await api.get_home_charger_last_record()
+                    _LOGGER.debug("家用充电桩最后记录: %s", home_charger_last_record)
+                except GeelyApiError as err:
+                    _LOGGER.debug("获取家用充电桩最后记录失败: %s", err)
+
             return {
                 "vehicle_info": cached_vehicle_info,
                 "vehicle_status": vehicle_status,
@@ -105,6 +141,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "last_soc": last_soc,
                 "charge_records": charge_records,
                 "reservation_info": reservation_info,
+                "home_charger_list": home_charger_list,
+                "home_charger_status": home_charger_status,
+                "home_charger_charging_data": home_charger_charging_data,
+                "home_charger_last_record": home_charger_last_record,
             }
         except GeelyApiError as err:
             raise UpdateFailed(f"Error communicating with API: {err}") from err
