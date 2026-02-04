@@ -520,9 +520,11 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
         """Return the charging status."""
         # 优先从家用充电桩状态获取
         charger_status = self.home_charger_status
+        _LOGGER.debug("充电状态传感器读取 home_charger_status: %s", charger_status)
         if charger_status:
             # 充电桩状态字段是 status（0=空闲，1=充电中，等）
             status = charger_status.get("status")
+            _LOGGER.debug("充电桩 status 字段值: %s (类型: %s)", status, type(status).__name__ if status is not None else "None")
             if status is not None:
                 status_map = {
                     0: "空闲",
@@ -534,7 +536,9 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
                     "2": "充电完成",
                     "3": "故障",
                 }
-                return status_map.get(status, f"状态({status})")
+                result = status_map.get(status, f"状态({status})")
+                _LOGGER.debug("充电状态传感器返回: %s", result)
+                return result
 
         # 回退到 last_soc 数据
         soc_data = self.last_soc

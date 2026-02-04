@@ -108,41 +108,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             try:
                 home_charger_list = await api.get_home_charger_list()
-                _LOGGER.debug("家用充电桩列表: %s", home_charger_list)
+                _LOGGER.info("家用充电桩列表: %s", home_charger_list)
             except GeelyApiError as err:
-                _LOGGER.debug("获取家用充电桩列表失败: %s", err)
+                _LOGGER.warning("获取家用充电桩列表失败: %s", err)
 
             if home_charger_list:
+                _LOGGER.info("检测到家用充电桩，开始获取详细数据...")
                 await asyncio.sleep(1)
                 try:
                     home_charger_status = await api.get_home_charger_status()
-                    _LOGGER.debug("家用充电桩状态: %s", home_charger_status)
+                    _LOGGER.info("家用充电桩状态: %s", home_charger_status)
                 except GeelyApiError as err:
-                    _LOGGER.debug("获取家用充电桩状态失败: %s", err)
+                    _LOGGER.warning("获取家用充电桩状态失败: %s", err)
 
                 await asyncio.sleep(1)
                 try:
                     # 获取详情，合并到状态中（详情包含 isOnline 等更多字段）
                     detail = await api.get_home_charger_detail()
-                    _LOGGER.debug("家用充电桩详情: %s", detail)
+                    _LOGGER.info("家用充电桩详情: %s", detail)
                     if detail:
                         home_charger_status = {**home_charger_status, **detail}
+                        _LOGGER.info("合并后充电桩状态: %s", home_charger_status)
                 except GeelyApiError as err:
-                    _LOGGER.debug("获取家用充电桩详情失败: %s", err)
+                    _LOGGER.warning("获取家用充电桩详情失败: %s", err)
 
                 await asyncio.sleep(1)
                 try:
                     home_charger_charging_data = await api.get_home_charger_charging_data()
-                    _LOGGER.debug("家用充电桩充电数据: %s", home_charger_charging_data)
+                    _LOGGER.info("家用充电桩充电数据: %s", home_charger_charging_data)
                 except GeelyApiError as err:
-                    _LOGGER.debug("获取家用充电桩充电数据失败: %s", err)
+                    _LOGGER.info("获取家用充电桩充电数据失败（可能未在充电）: %s", err)
 
                 await asyncio.sleep(1)
                 try:
                     home_charger_last_record = await api.get_home_charger_last_record()
-                    _LOGGER.debug("家用充电桩最后记录: %s", home_charger_last_record)
+                    _LOGGER.info("家用充电桩最后记录: %s", home_charger_last_record)
                 except GeelyApiError as err:
-                    _LOGGER.debug("获取家用充电桩最后记录失败: %s", err)
+                    _LOGGER.info("获取家用充电桩最后记录失败: %s", err)
+            else:
+                _LOGGER.info("未检测到家用充电桩")
 
             return {
                 "vehicle_info": cached_vehicle_info,

@@ -863,7 +863,9 @@ class GeelyGalaxyApi:
     async def _ensure_recharge_auth(self) -> None:
         """确保有有效的充电服务 authToken。"""
         if not self._recharge_auth_token:
+            _LOGGER.info("充电服务 authToken 为空，开始获取...")
             await self.get_recharge_auth_token()
+            _LOGGER.info("充电服务 authToken 获取成功")
 
     async def _recharge_post(self, path: str, body_dict: dict) -> dict[str, Any]:
         """充电服务 POST 请求。"""
@@ -898,13 +900,17 @@ class GeelyGalaxyApi:
     async def get_home_charger_list(self) -> list[dict[str, Any]]:
         """获取家用充电桩列表。"""
         try:
+            _LOGGER.info("开始获取家用充电桩列表...")
             result = await self._recharge_post("/app/hcharger/getMyPilingsNew", {})
+            _LOGGER.info("充电桩列表 API 返回: %s (类型: %s)", result, type(result).__name__)
             if isinstance(result, list) and result:
                 self._piling_code = result[0].get("pilingsCode")
+                _LOGGER.info("检测到充电桩，编码: %s", self._piling_code)
                 return result
+            _LOGGER.info("未检测到充电桩（列表为空）")
             return []
         except GeelyApiError as err:
-            _LOGGER.debug("获取充电桩列表失败: %s", err)
+            _LOGGER.warning("获取充电桩列表失败: %s", err)
             return []
 
     async def get_home_charger_status(self, piling_code: str | None = None) -> dict[str, Any]:
@@ -915,17 +921,21 @@ class GeelyGalaxyApi:
             if chargers:
                 code = chargers[0].get("pilingsCode")
         if not code:
-            _LOGGER.debug("无可用充电桩")
+            _LOGGER.info("无可用充电桩编码")
             return {}
 
         try:
+            _LOGGER.info("查询充电桩状态，编码: %s", code)
             result = await self._recharge_post("/app/hcharger/queryEquipStatus", {"pilingsCode": code})
+            _LOGGER.info("充电桩状态 API 返回: %s (类型: %s)", result, type(result).__name__)
             # API 返回数组，取第一个元素
             if isinstance(result, list) and result:
-                return result[0]
+                status_data = result[0]
+                _LOGGER.info("充电桩状态数据: %s", status_data)
+                return status_data
             return result if isinstance(result, dict) else {}
         except GeelyApiError as err:
-            _LOGGER.debug("查询充电桩状态失败: %s", err)
+            _LOGGER.warning("查询充电桩状态失败: %s", err)
             return {}
 
     async def get_home_charger_charging_data(self, piling_code: str | None = None) -> dict[str, Any]:
