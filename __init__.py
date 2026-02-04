@@ -114,13 +114,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.warning("[诊断] 获取家用充电桩列表失败: %s", err)
 
             if home_charger_list:
-                _LOGGER.info("检测到家用充电桩，开始获取详细数据...")
+                # 充电桩列表已包含 status 字段，先用它作为初始状态
+                home_charger_status = home_charger_list[0]
+                _LOGGER.warning("[诊断] 使用充电桩列表数据作为初始状态: %s", home_charger_status)
+
                 await asyncio.sleep(1)
                 try:
-                    home_charger_status = await api.get_home_charger_status()
-                    _LOGGER.info("家用充电桩状态: %s", home_charger_status)
+                    # 获取更详细的状态（可能包含更多字段）
+                    detailed_status = await api.get_home_charger_status()
+                    _LOGGER.warning("[诊断] 充电桩详细状态: %s", detailed_status)
+                    if detailed_status:
+                        home_charger_status = {**home_charger_status, **detailed_status}
                 except GeelyApiError as err:
-                    _LOGGER.warning("获取家用充电桩状态失败: %s", err)
+                    _LOGGER.warning("[诊断] 获取充电桩详细状态失败（使用列表数据）: %s", err)
 
                 await asyncio.sleep(1)
                 try:
