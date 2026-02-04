@@ -41,6 +41,13 @@ async def async_setup_entry(
         GeelyPurifierOffButton(coordinator, entry, api),
     ]
 
+    # 如果有家用充电桩，添加充电桩控制按钮
+    if coordinator.data and coordinator.data.get("home_charger_list"):
+        entities.extend([
+            HomeChargerStartButton(coordinator, entry, api),
+            HomeChargerStopButton(coordinator, entry, api),
+        ])
+
     async_add_entities(entities)
 
 
@@ -292,3 +299,76 @@ class GeelyPurifierOffButton(GeelyBaseButton):
             await self.coordinator.async_request_refresh()
         except Exception as err:
             _LOGGER.error("关闭空气净化失败: %s", err)
+
+
+# ========== 家用充电桩按钮 ==========
+
+class HomeChargerBaseButton(CoordinatorEntity, ButtonEntity):
+    """Base class for home charger buttons."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: DataUpdateCoordinator,
+        entry: ConfigEntry,
+        api,
+    ) -> None:
+        """Initialize the button."""
+        super().__init__(coordinator)
+        self._entry = entry
+        self._api = api
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        """Return device info for the home charger."""
+        charger_status = self.coordinator.data.get("home_charger_status", {}) if self.coordinator.data else {}
+        piling_code = charger_status.get("pilingsCode", "unknown")
+        charger_name = charger_status.get("pilingsName", "家用充电桩")
+
+        return {
+            "identifiers": {(DOMAIN, f"charger_{piling_code}")},
+            "name": charger_name,
+            "manufacturer": "吉利汽车",
+            "model": "家用充电桩",
+        }
+
+
+class HomeChargerStartButton(HomeChargerBaseButton):
+    """Button to start home charger."""
+
+    _attr_name = "开始充电"
+    _attr_icon = "mdi:ev-station"
+
+    def __init__(self, coordinator, entry, api) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry, api)
+        self._attr_unique_id = f"{entry.entry_id}_btn_charger_start"
+
+    async def async_press(self) -> None:
+        """Start charging."""
+        try:
+            await self._api.start_home_charger()
+            await self.coordinator.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error("开始充电失败: %s", err)
+
+
+class HomeChargerStopButton(HomeChargerBaseButton):
+    """Button to stop home charger."""
+
+    _attr_name = "停止充电"
+    _attr_icon = "mdi:ev-station"
+
+    def __init__(self, coordinator, entry, api) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry, api)
+        self._attr_unique_id = f"{entry.entry_id}_btn_charger_stop"
+
+    async def async_press(self) -> None:
+        """Stop charging."""
+        try:
+            await self._api.stop_home_charger()
+            await self.coordinator.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error("停止充电失败: %s", err)
