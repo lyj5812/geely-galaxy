@@ -25,7 +25,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -57,7 +57,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # API 调用之间添加延迟，避免服务端限流
             await asyncio.sleep(2)
 
-            # 获取车辆状态（失败时不阻塞整个集成）
+            # 获取车辆状态
             vehicle_status = {}
             try:
                 vehicle_status = await api.get_vehicle_status(cached_vin)
@@ -73,10 +73,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except GeelyApiError:
                 pass
 
+            await asyncio.sleep(1)
+
+            # 获取充电相关信息
+            last_soc = {}
+            charge_records = {}
+            reservation_info = {}
+            try:
+                last_soc = await api.get_last_soc(cached_vin)
+            except GeelyApiError:
+                pass
+
+            await asyncio.sleep(1)
+
+            try:
+                charge_records = await api.get_charge_records(cached_vin, page=1, page_size=5)
+            except GeelyApiError:
+                pass
+
+            await asyncio.sleep(1)
+
+            try:
+                reservation_info = await api.get_reservation_info(cached_vin)
+            except GeelyApiError:
+                pass
+
             return {
                 "vehicle_info": cached_vehicle_info,
                 "vehicle_status": vehicle_status,
                 "switch_status": switch_status,
+                "last_soc": last_soc,
+                "charge_records": charge_records,
+                "reservation_info": reservation_info,
             }
         except GeelyApiError as err:
             raise UpdateFailed(f"Error communicating with API: {err}") from err

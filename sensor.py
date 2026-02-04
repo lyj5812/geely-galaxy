@@ -14,6 +14,8 @@ from homeassistant.const import (
     PERCENTAGE,
     UnitOfLength,
     UnitOfTemperature,
+    UnitOfEnergy,
+    UnitOfPower,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -35,7 +37,7 @@ async def async_setup_entry(
     """Set up Geely Galaxy sensors based on a config entry."""
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
-    entities = [
+    entities: list[GeelyBaseSensor] = [
         # 基础信息
         GeelyVehicleModelSensor(coordinator, entry),
         GeelyVinSensor(coordinator, entry),
@@ -44,17 +46,23 @@ async def async_setup_entry(
         GeelyRangeSensor(coordinator, entry),
         GeelyOdometerSensor(coordinator, entry),
         GeelyChargeTimeSensor(coordinator, entry),
-        # 温度
+        # 温度和环境
         GeelyInteriorTempSensor(coordinator, entry),
         GeelyExteriorTempSensor(coordinator, entry),
-        # PM2.5
         GeelyPM25Sensor(coordinator, entry),
-        # 能耗
         GeelyPowerConsumptionSensor(coordinator, entry),
         # 状态
         GeelyDoorLockSensor(coordinator, entry),
         GeelyAcStatusSensor(coordinator, entry),
         GeelySentryModeSensor(coordinator, entry),
+        # 充电相关
+        GeelyChargingStatusSensor(coordinator, entry),
+        GeelyChargingPowerSensor(coordinator, entry),
+        GeelyChargingVoltageSensor(coordinator, entry),
+        GeelyChargingCurrentSensor(coordinator, entry),
+        GeelyLastChargeSocSensor(coordinator, entry),
+        GeelyChargeReservationSensor(coordinator, entry),
+        GeelyLastChargeEnergySensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -108,6 +116,27 @@ class GeelyBaseSensor(CoordinatorEntity, SensorEntity):
         if not self.coordinator.data:
             return {}
         return self.coordinator.data.get("vehicle_info", {})
+
+    @property
+    def last_soc(self) -> dict[str, Any]:
+        """Get last SOC info from coordinator data."""
+        if not self.coordinator.data:
+            return {}
+        return self.coordinator.data.get("last_soc", {})
+
+    @property
+    def charge_records(self) -> dict[str, Any]:
+        """Get charge records from coordinator data."""
+        if not self.coordinator.data:
+            return {}
+        return self.coordinator.data.get("charge_records", {})
+
+    @property
+    def reservation_info(self) -> dict[str, Any]:
+        """Get reservation info from coordinator data."""
+        if not self.coordinator.data:
+            return {}
+        return self.coordinator.data.get("reservation_info", {})
 
 
 class GeelyVehicleModelSensor(GeelyBaseSensor):
@@ -445,3 +474,249 @@ class GeelySentryModeSensor(GeelyBaseSensor):
         if self.native_value == "开启":
             return "mdi:shield-car"
         return "mdi:shield-off"
+
+
+class GeelyChargingStatusSensor(GeelyBaseSensor):
+    """Sensor for charging status."""
+
+    _attr_name = "充电状态"
+    _attr_icon = "mdi:ev-station"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_charging_status"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the charging status."""
+        # 从 last_soc 获取充电状态
+        soc_data = self.last_soc
+        charging_status = soc_data.get("chargingStatus") or soc_data.get("chargeStatus")
+        if charging_status is not None:
+            status_map = {
+                0: "未充电",
+                1: "充电中",
+                2: "充电完成",
+                3: "充电暂停",
+                "0": "未充电",
+                "1": "充电中",
+                "2": "充电完成",
+                "3": "充电暂停",
+            }
+            return status_map.get(charging_status, f"未知({charging_status})")
+        return None
+
+    @property
+    def icon(self) -> str:
+        """Return icon based on charging status."""
+        if self.native_value == "充电中":
+            return "mdi:battery-charging"
+        elif self.native_value == "充电完成":
+            return "mdi:battery-check"
+        return "mdi:ev-station"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes."""
+        soc_data = self.last_soc
+        attrs = {}
+        if soc_data:
+            if "soc" in soc_data:
+                attrs["soc"] = soc_data["soc"]
+            if "updateTime" in soc_data:
+                attrs["update_time"] = soc_data["updateTime"]
+        return attrs
+
+
+class GeelyChargingPowerSensor(GeelyBaseSensor):
+    """Sensor for charging power."""
+
+    _attr_name = "充电功率"
+    _attr_native_unit_of_measurement = UnitOfPower.KILO_WATT
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:flash"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_charging_power"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the charging power."""
+        soc_data = self.last_soc
+        power = soc_data.get("chargingPower") or soc_data.get("power")
+        if power is not None:
+            return round(float(power), 2)
+        return None
+
+
+class GeelyChargingVoltageSensor(GeelyBaseSensor):
+    """Sensor for charging voltage."""
+
+    _attr_name = "充电电压"
+    _attr_native_unit_of_measurement = "V"
+    _attr_device_class = SensorDeviceClass.VOLTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:lightning-bolt"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_charging_voltage"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the charging voltage."""
+        soc_data = self.last_soc
+        voltage = soc_data.get("voltage") or soc_data.get("chargingVoltage")
+        if voltage is not None:
+            return round(float(voltage), 1)
+        return None
+
+
+class GeelyChargingCurrentSensor(GeelyBaseSensor):
+    """Sensor for charging current."""
+
+    _attr_name = "充电电流"
+    _attr_native_unit_of_measurement = "A"
+    _attr_device_class = SensorDeviceClass.CURRENT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:current-ac"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_charging_current"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the charging current."""
+        soc_data = self.last_soc
+        current = soc_data.get("current") or soc_data.get("chargingCurrent")
+        if current is not None:
+            return round(float(current), 1)
+        return None
+
+
+class GeelyLastChargeSocSensor(GeelyBaseSensor):
+    """Sensor for last charge SOC."""
+
+    _attr_name = "最后充电电量"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-charging-100"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_last_charge_soc"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the last charge SOC."""
+        soc_data = self.last_soc
+        soc = soc_data.get("soc") or soc_data.get("chargeLevel")
+        if soc is not None:
+            return int(soc)
+        return None
+
+
+class GeelyChargeReservationSensor(GeelyBaseSensor):
+    """Sensor for charge reservation status."""
+
+    _attr_name = "预约充电"
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_charge_reservation"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the charge reservation status."""
+        reservation = self.reservation_info
+        if not reservation:
+            return None
+
+        enabled = reservation.get("enabled") or reservation.get("reservationEnabled")
+        if enabled in (True, 1, "1"):
+            start_time = reservation.get("startTime", "")
+            end_time = reservation.get("endTime", "")
+            if start_time and end_time:
+                return f"已开启 ({start_time}-{end_time})"
+            return "已开启"
+        elif enabled in (False, 0, "0"):
+            return "未开启"
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes."""
+        reservation = self.reservation_info
+        if not reservation:
+            return {}
+
+        attrs = {}
+        for key in ["startTime", "endTime", "targetSoc", "departuretime", "departureEnabled"]:
+            if key in reservation:
+                attrs[key] = reservation[key]
+        return attrs
+
+
+class GeelyLastChargeEnergySensor(GeelyBaseSensor):
+    """Sensor for last charge energy."""
+
+    _attr_name = "上次充电电量"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_icon = "mdi:battery-plus"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_last_charge_energy"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the last charge energy."""
+        records = self.charge_records
+        if not records:
+            return None
+
+        # 获取记录列表
+        record_list = records.get("list") or records.get("records") or []
+        if not record_list:
+            return None
+
+        # 取最近一条记录
+        latest = record_list[0] if record_list else {}
+        energy = latest.get("chargeEnergy") or latest.get("energy") or latest.get("totalEnergy")
+        if energy is not None:
+            return round(float(energy), 2)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes."""
+        records = self.charge_records
+        if not records:
+            return {}
+
+        record_list = records.get("list") or records.get("records") or []
+        if not record_list:
+            return {}
+
+        latest = record_list[0] if record_list else {}
+        attrs = {}
+        for key in ["startTime", "endTime", "startSoc", "endSoc", "duration", "chargeType", "stationName"]:
+            if key in latest and latest[key]:
+                attrs[key] = latest[key]
+        return attrs
+
+

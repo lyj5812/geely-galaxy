@@ -206,7 +206,7 @@ class GeelyGalaxyApi:
             "deviceSN": self._device_sn,
             "txCookie": "",
             "appId": "galaxy-app",
-            "appVersion": "1.39.0",
+            "appVersion": "1.45.0",
             "platform": "Android",
             "Cache-Control": "no-cache",
             "Connection": "Keep-Alive",
@@ -270,10 +270,10 @@ class GeelyGalaxyApi:
             "deviceSN": self._device_sn,
             "txCookie": "",
             "appId": "galaxy-app",
-            "appVersion": "1.39.0",
+            "appVersion": "1.45.0",
             "platform": "Android",
             "Cache-Control": "no-cache",
-            "sweet_security_info": '{"appVersion":"1.27.0","platform":"android"}',
+            "sweet_security_info": '{"appVersion":"1.45.0","platform":"android"}',
             "methodtype": "6",
             "contenttype": "application/json",
             "Content-Type": "application/json; charset=utf-8",
@@ -379,6 +379,24 @@ class GeelyGalaxyApi:
         except aiohttp.ClientError as err:
             raise GeelyApiError(f"Connection error: {err}") from err
 
+    async def _ensure_vin(self, vin: str | None) -> str:
+        """确保有可用的 VIN。"""
+        if not self._token:
+            await self.refresh_access_token()
+
+        if not vin and self._vehicle_info:
+            vin = self._vehicle_info.get("vin")
+
+        if not vin:
+            vehicles = await self.get_vehicle_list()
+            if vehicles:
+                vin = vehicles[0].get("vin")
+
+        if not vin:
+            raise GeelyApiError("No VIN available")
+
+        return vin
+
     async def _call_vehicle_status(self, vin: str) -> dict[str, Any]:
         """Internal: make vehicle status API call."""
         session = await self._ensure_session()
@@ -412,51 +430,44 @@ class GeelyGalaxyApi:
             return data.get("data") or {}
 
     async def get_vehicle_status(self, vin: str | None = None) -> dict[str, Any]:
-        """Get vehicle status with retry on failure."""
+        """Get vehicle status with retry on failure.
+
+        对于 geely2 车型（如 L7），服务端可能返回 B00000 错误（请求被拒绝），
+        此时返回空字典而不是抛出异常，以便其他功能（开关状态、远程控制）继续正常工作。
+        """
         import asyncio
 
-        if not self._token:
-            await self.refresh_access_token()
-
-        if not vin and self._vehicle_info:
-            vin = self._vehicle_info.get("vin")
-
-        if not vin:
-            vehicles = await self.get_vehicle_list()
-            if vehicles:
-                vin = vehicles[0].get("vin")
-
-        if not vin:
-            raise GeelyApiError("No VIN available")
+        vin = await self._ensure_vin(vin)
 
         try:
             return await self._call_vehicle_status(vin)
-        except GeelyApiError:
-            # B00000 可能是 token 失效或服务端限流，刷新 token 后延迟重试
+        except GeelyApiError as err:
+            err_msg = str(err)
+            # B00000 表示请求被服务端拒绝（常见于 geely2 车型）
+            if "B00000" in err_msg:
+                _LOGGER.warning(
+                    "车辆状态查询被服务端拒绝 (B00000)，可能是 geely2 车型限制。"
+                    "开关状态和远程控制不受影响。"
+                )
+                return {}
+
+            # 其他错误：尝试刷新 token 后重试一次
             _LOGGER.info("车辆状态首次请求失败，刷新 token 后重试...")
             await self.refresh_access_token()
             await asyncio.sleep(2)
             try:
                 return await self._call_vehicle_status(vin)
+            except GeelyApiError as retry_err:
+                if "B00000" in str(retry_err):
+                    _LOGGER.warning("车辆状态查询被服务端拒绝 (B00000)")
+                    return {}
+                raise
             except aiohttp.ClientError as err:
                 raise GeelyApiError(f"Connection error: {err}") from err
 
     async def get_switch_status(self, vin: str | None = None) -> dict[str, Any]:
         """Get vehicle switch status (sentry mode, etc)."""
-        if not self._token:
-            await self.refresh_access_token()
-
-        if not vin and self._vehicle_info:
-            vin = self._vehicle_info.get("vin")
-
-        if not vin:
-            vehicles = await self.get_vehicle_list()
-            if vehicles:
-                vin = vehicles[0].get("vin")
-
-        if not vin:
-            raise GeelyApiError("No VIN available")
-
+        vin = await self._ensure_vin(vin)
         session = await self._ensure_session()
         path = "/vc/app/v1/vehicle/switch/status"
         url = f"https://{API_HOSTS['vc']}{path}"
@@ -512,6 +523,152 @@ class GeelyGalaxyApi:
 
         except aiohttp.ClientError as err:
             raise GeelyApiError(f"Connection error: {err}") from err
+
+    async def _vc_post(self, path: str, body_dict: dict) -> dict[str, Any]:
+        """通用 USP 网关 POST 请求。"""
+        session = await self._ensure_session()
+        url = f"https://{API_HOSTS['vc']}{path}"
+        body = json.dumps(body_dict, separators=(",", ":"))
+        headers = self._build_post_headers(APP_KEYS["vc"], path, body)
+
+        _LOGGER.debug("vc POST %s body=%s", path, body)
+        try:
+            async with session.post(url, data=body, headers=headers) as response:
+                response_text = await response.text()
+                _LOGGER.debug("vc POST %s response: %s", path, response_text[:500])
+
+                if response.status != 200:
+                    raise GeelyApiError(f"API request failed: HTTP {response.status}")
+
+                data = json.loads(response_text)
+                code = data.get("code")
+                if code not in (0, "0", "success"):
+                    raise GeelyApiError(
+                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
+                    )
+
+                return data.get("data") or {}
+        except aiohttp.ClientError as err:
+            raise GeelyApiError(f"Connection error: {err}") from err
+
+    async def control_switch(
+        self, vin: str | None, switch_type: str, status: bool
+    ) -> dict[str, Any]:
+        """控制车辆开关（哨兵模式等）。
+
+        switch_type: "vstdMode" (哨兵), "strangerMode" (陌生人预警) 等
+        status: True=开启, False=关闭
+        """
+        vin = await self._ensure_vin(vin)
+        return await self._vc_post("/vc/app/v1/vehicle/control/switch", {
+            "clientType": 2,
+            "switchType": switch_type,
+            "switchStatus": "1" if status else "0",
+            "vin": vin,
+            "tspUid": None,
+        })
+
+    async def control_door(self, vin: str | None, lock: bool) -> dict[str, Any]:
+        """控制车锁。lock=True 锁车，lock=False 解锁。"""
+        vin = await self._ensure_vin(vin)
+        return await self._vc_post("/vc/app/v1/vehicle/control/door", {
+            "clientType": 2,
+            "doorCtrlType": 1 if lock else 0,
+            "vin": vin,
+        })
+
+    async def control_ac(
+        self, vin: str | None, on: bool, temperature: float = 24.0
+    ) -> dict[str, Any]:
+        """控制空调。on=True 开启，on=False 关闭。"""
+        vin = await self._ensure_vin(vin)
+        return await self._vc_post("/vc/app/v1/vehicle/control/climate", {
+            "clientType": 2,
+            "climateCtrlType": 1 if on else 0,
+            "temperature": temperature,
+            "vin": vin,
+        })
+
+    async def control_search(self, vin: str | None) -> dict[str, Any]:
+        """闪灯鸣笛寻车。"""
+        vin = await self._ensure_vin(vin)
+        return await self._vc_post("/vc/app/v1/vehicle/control/search", {
+            "clientType": 2,
+            "searchType": 0,
+            "vin": vin,
+        })
+
+    async def control_window(
+        self, vin: str | None, action: str
+    ) -> dict[str, Any]:
+        """控制车窗。action: "close", "lightOpen" (微开), "fullOpen" (全开)。"""
+        vin = await self._ensure_vin(vin)
+        action_map = {"close": 1, "lightOpen": 2, "fullOpen": 3}
+        return await self._vc_post("/vc/app/v1/vehicle/control/window", {
+            "clientType": 2,
+            "windowCtrlType": action_map.get(action, 1),
+            "vin": vin,
+        })
+
+    async def control_defrost(self, vin: str | None, on: bool) -> dict[str, Any]:
+        """控制除霜。"""
+        vin = await self._ensure_vin(vin)
+        return await self._vc_post("/vc/app/v1/vehicle/control/noEngine", {
+            "clientType": 2,
+            "noEngineCtrlType": 3 if on else 4,
+            "vin": vin,
+        })
+
+    async def control_purifier(self, vin: str | None, on: bool) -> dict[str, Any]:
+        """控制空气净化。"""
+        vin = await self._ensure_vin(vin)
+        return await self._vc_post("/vc/app/v1/vehicle/control/noEngine", {
+            "clientType": 2,
+            "noEngineCtrlType": 1 if on else 2,
+            "vin": vin,
+        })
+
+    async def get_last_soc(self, vin: str | None = None) -> dict[str, Any]:
+        """获取最后 SOC 信息（充电状态）。"""
+        vin = await self._ensure_vin(vin)
+        try:
+            return await self._vc_post("/vc/app/v1/reservation/getLastSoc", {"vin": vin})
+        except GeelyApiError as err:
+            _LOGGER.debug("获取 SOC 信息失败: %s", err)
+            return {}
+
+    async def get_charge_records(
+        self, vin: str | None = None, page: int = 1, page_size: int = 10
+    ) -> dict[str, Any]:
+        """获取充电记录列表。"""
+        vin = await self._ensure_vin(vin)
+        try:
+            return await self._vc_post("/vc/app/v1/charge/record/list", {
+                "vin": vin,
+                "pageNo": page,
+                "pageSize": page_size,
+            })
+        except GeelyApiError as err:
+            _LOGGER.debug("获取充电记录失败: %s", err)
+            return {}
+
+    async def get_reservation_info(self, vin: str | None = None) -> dict[str, Any]:
+        """获取预约充电信息。"""
+        vin = await self._ensure_vin(vin)
+        try:
+            return await self._vc_post("/vc/app/v1/reservation/info", {"vin": vin})
+        except GeelyApiError as err:
+            _LOGGER.debug("获取预约充电信息失败: %s", err)
+            return {}
+
+    async def get_reservation_setting(self, vin: str | None = None) -> dict[str, Any]:
+        """获取充电预约设置。"""
+        vin = await self._ensure_vin(vin)
+        try:
+            return await self._vc_post("/vc/app/v1/reservation/setting", {"vin": vin})
+        except GeelyApiError as err:
+            _LOGGER.debug("获取充电预约设置失败: %s", err)
+            return {}
 
     async def test_connection(self) -> bool:
         """Test the API connection."""
