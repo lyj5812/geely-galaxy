@@ -166,7 +166,8 @@ class GeelyGalaxyApi:
         string_to_sign += f"x-ca-key:{app_key}\n"
         string_to_sign += f"x-ca-nonce:{nonce}\n"
         string_to_sign += f"x-ca-timestamp:{timestamp}\n"
-        string_to_sign += path
+        # 对查询参数排序（与测试脚本一致）
+        string_to_sign += self._sort_query_params(path)
 
         _LOGGER.debug("StringToSign: %s", repr(string_to_sign))
 
@@ -231,6 +232,8 @@ class GeelyGalaxyApi:
             headers["host"] = API_HOSTS["user"]
             headers["taenantid"] = "569001701001"
             headers["svcsid"] = ""
+            # 用户 API 的签名头顺序必须是字母顺序
+            headers["x-ca-signature-headers"] = "x-ca-key,x-ca-nonce,x-ca-timestamp"
             del headers["x-refresh-token"]
 
         return headers
