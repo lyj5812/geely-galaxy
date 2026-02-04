@@ -106,11 +106,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             await asyncio.sleep(1)
 
+            _LOGGER.warning("[诊断] 准备获取家用充电桩数据...")
             try:
                 home_charger_list = await api.get_home_charger_list()
-                _LOGGER.info("家用充电桩列表: %s", home_charger_list)
+                _LOGGER.warning("[诊断] 家用充电桩列表结果: %s", home_charger_list)
             except GeelyApiError as err:
-                _LOGGER.warning("获取家用充电桩列表失败: %s", err)
+                _LOGGER.warning("[诊断] 获取家用充电桩列表失败: %s", err)
 
             if home_charger_list:
                 _LOGGER.info("检测到家用充电桩，开始获取详细数据...")

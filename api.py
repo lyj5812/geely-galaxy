@@ -798,7 +798,9 @@ class GeelyGalaxyApi:
 
     async def get_oauth_code(self) -> str:
         """获取充电服务的 OAuth 授权码。"""
+        _LOGGER.warning("[诊断] 开始获取 OAuth 授权码...")
         if not self._token:
+            _LOGGER.warning("[诊断] token 为空，先刷新...")
             await self.refresh_access_token()
 
         session = await self._ensure_session()
@@ -806,11 +808,10 @@ class GeelyGalaxyApi:
         url = f"https://{API_HOSTS['user']}{path}"
         headers = self._build_get_headers(APP_KEYS["user"], path)
 
-        _LOGGER.debug("Calling get_oauth_code: %s", url)
         try:
             async with session.get(url, headers=headers) as response:
                 response_text = await response.text()
-                _LOGGER.debug("OAuth code response: %s", response_text)
+                _LOGGER.warning("[诊断] OAuth code 响应: HTTP %s, body=%s", response.status, response_text[:300])
 
                 if response.status != 200:
                     raise GeelyApiError(f"OAuth code request failed: HTTP {response.status}")
@@ -823,6 +824,7 @@ class GeelyGalaxyApi:
                 if not oauth_code:
                     raise GeelyApiError("No OAuth code in response")
 
+                _LOGGER.warning("[诊断] OAuth 授权码获取成功")
                 return oauth_code
 
         except aiohttp.ClientError as err:
@@ -872,9 +874,9 @@ class GeelyGalaxyApi:
     async def _ensure_recharge_auth(self) -> None:
         """确保有有效的充电服务 authToken。"""
         if not self._recharge_auth_token:
-            _LOGGER.info("充电服务 authToken 为空，开始获取...")
+            _LOGGER.warning("[诊断] 充电服务 authToken 为空，开始获取...")
             await self.get_recharge_auth_token()
-            _LOGGER.info("充电服务 authToken 获取成功")
+            _LOGGER.warning("[诊断] 充电服务 authToken 获取成功")
 
     async def _recharge_post(self, path: str, body_dict: dict) -> dict[str, Any]:
         """充电服务 POST 请求。"""
@@ -909,17 +911,17 @@ class GeelyGalaxyApi:
     async def get_home_charger_list(self) -> list[dict[str, Any]]:
         """获取家用充电桩列表。"""
         try:
-            _LOGGER.info("开始获取家用充电桩列表...")
+            _LOGGER.warning("[诊断] 开始获取家用充电桩列表...")
             result = await self._recharge_post("/app/hcharger/getMyPilingsNew", {})
-            _LOGGER.info("充电桩列表 API 返回: %s (类型: %s)", result, type(result).__name__)
+            _LOGGER.warning("[诊断] 充电桩列表 API 返回: %s", result)
             if isinstance(result, list) and result:
                 self._piling_code = result[0].get("pilingsCode")
-                _LOGGER.info("检测到充电桩，编码: %s", self._piling_code)
+                _LOGGER.warning("[诊断] 检测到充电桩，编码: %s", self._piling_code)
                 return result
-            _LOGGER.info("未检测到充电桩（列表为空）")
+            _LOGGER.warning("[诊断] 未检测到充电桩（列表为空或格式错误）")
             return []
         except GeelyApiError as err:
-            _LOGGER.warning("获取充电桩列表失败: %s", err)
+            _LOGGER.warning("[诊断] 获取充电桩列表失败: %s", err)
             return []
 
     async def get_home_charger_status(self, piling_code: str | None = None) -> dict[str, Any]:
