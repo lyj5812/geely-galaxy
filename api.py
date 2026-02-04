@@ -223,7 +223,6 @@ class GeelyGalaxyApi:
             "Cache-Control": "no-cache",
             "Connection": "Keep-Alive",
             "Accept-Encoding": "gzip",
-            "token": self._token or "",
         }
 
         # 根据 AppKey 设置不同的参数（与 JS getGetHeader 一致）
@@ -235,6 +234,10 @@ class GeelyGalaxyApi:
             # 用户 API 的签名头顺序必须是字母顺序
             headers["x-ca-signature-headers"] = "x-ca-key,x-ca-nonce,x-ca-timestamp"
             del headers["x-refresh-token"]
+
+        # 与测试脚本一致：只在有 token 时才设置 token header
+        if self._token:
+            headers["token"] = self._token
 
         return headers
 
@@ -293,7 +296,6 @@ class GeelyGalaxyApi:
             "Content-Type": "application/json; charset=utf-8",
             "Connection": "Keep-Alive",
             "Accept-Encoding": "gzip",
-            "token": self._token or "",
         }
 
         # 根据 AppKey 设置不同的参数（与 JS getPostHeader 一致）
@@ -307,6 +309,10 @@ class GeelyGalaxyApi:
             headers["host"] = API_HOSTS["vc"]
         else:
             headers["host"] = API_HOSTS["app"]
+
+        # 与测试脚本一致：只在有 token 时才设置 token header
+        if self._token:
+            headers["token"] = self._token
 
         return headers
 
