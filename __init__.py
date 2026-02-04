@@ -122,6 +122,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await asyncio.sleep(1)
                 try:
+                    # 获取详情，合并到状态中（详情包含 isOnline 等更多字段）
+                    detail = await api.get_home_charger_detail()
+                    _LOGGER.debug("家用充电桩详情: %s", detail)
+                    if detail:
+                        home_charger_status = {**home_charger_status, **detail}
+                except GeelyApiError as err:
+                    _LOGGER.debug("获取家用充电桩详情失败: %s", err)
+
+                await asyncio.sleep(1)
+                try:
                     home_charger_charging_data = await api.get_home_charger_charging_data()
                     _LOGGER.debug("家用充电桩充电数据: %s", home_charger_charging_data)
                 except GeelyApiError as err:

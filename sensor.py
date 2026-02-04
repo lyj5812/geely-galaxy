@@ -521,8 +521,8 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
         # 优先从家用充电桩状态获取
         charger_status = self.home_charger_status
         if charger_status:
-            # 充电桩状态字段可能是 chargeStatus, workStatus, equipStatus 等
-            status = charger_status.get("chargeStatus") or charger_status.get("workStatus") or charger_status.get("equipStatus")
+            # 充电桩状态字段是 status（0=空闲，1=充电中，等）
+            status = charger_status.get("status")
             if status is not None:
                 status_map = {
                     0: "空闲",
@@ -533,10 +533,6 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
                     "1": "充电中",
                     "2": "充电完成",
                     "3": "故障",
-                    "idle": "空闲",
-                    "charging": "充电中",
-                    "finished": "充电完成",
-                    "fault": "故障",
                 }
                 return status_map.get(status, f"状态({status})")
 
@@ -573,8 +569,8 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
         # 家用充电桩数据
         charger_status = self.home_charger_status
         if charger_status:
-            for key in ["pilingsCode", "onlineStatus", "updateTime"]:
-                if key in charger_status and charger_status[key]:
+            for key in ["pilingsCode", "name", "isOnline", "isOwner", "bleName"]:
+                if key in charger_status and charger_status[key] is not None:
                     attrs[key] = charger_status[key]
         # last_soc 数据
         soc_data = self.last_soc

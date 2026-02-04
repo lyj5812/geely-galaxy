@@ -919,7 +919,11 @@ class GeelyGalaxyApi:
             return {}
 
         try:
-            return await self._recharge_post("/app/hcharger/queryEquipStatus", {"pilingsCode": code})
+            result = await self._recharge_post("/app/hcharger/queryEquipStatus", {"pilingsCode": code})
+            # API 返回数组，取第一个元素
+            if isinstance(result, list) and result:
+                return result[0]
+            return result if isinstance(result, dict) else {}
         except GeelyApiError as err:
             _LOGGER.debug("查询充电桩状态失败: %s", err)
             return {}
@@ -961,7 +965,11 @@ class GeelyGalaxyApi:
             return {}
 
         try:
-            return await self._recharge_post("/app/hcharger/getPlingsDetailNew", {"pilingsCode": code})
+            result = await self._recharge_post("/app/hcharger/getPlingsDetailNew", {"pilingsCode": code})
+            # API 返回数组，取第一个元素
+            if isinstance(result, list) and result:
+                return result[0]
+            return result if isinstance(result, dict) else {}
         except GeelyApiError as err:
             _LOGGER.debug("获取充电桩详情失败: %s", err)
             return {}
