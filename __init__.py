@@ -103,6 +103,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             home_charger_status = {}
             home_charger_charging_data = {}
             home_charger_last_record = {}
+            home_charger_records = []
 
             await asyncio.sleep(1)
 
@@ -152,6 +153,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info("家用充电桩最后记录: %s", home_charger_last_record)
                 except GeelyApiError as err:
                     _LOGGER.info("获取家用充电桩最后记录失败: %s", err)
+
+                await asyncio.sleep(1)
+                try:
+                    records_result = await api.get_home_charger_records(page=1, page_size=10)
+                    # API 返回的 data 字段已被提取，可能是列表或字典
+                    if isinstance(records_result, list):
+                        home_charger_records = records_result
+                    elif isinstance(records_result, dict):
+                        home_charger_records = records_result.get("list") or records_result.get("records") or []
+                    _LOGGER.info("家用充电桩充电记录: %s 条", len(home_charger_records))
+                except GeelyApiError as err:
+                    _LOGGER.info("获取家用充电桩充电记录失败: %s", err)
             else:
                 _LOGGER.info("未检测到家用充电桩")
 
@@ -166,6 +179,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "home_charger_status": home_charger_status,
                 "home_charger_charging_data": home_charger_charging_data,
                 "home_charger_last_record": home_charger_last_record,
+                "home_charger_records": home_charger_records,
             }
         except GeelyApiError as err:
             raise UpdateFailed(f"Error communicating with API: {err}") from err

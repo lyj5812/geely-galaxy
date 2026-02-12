@@ -1,6 +1,7 @@
 """Button platform for Geely Galaxy."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -349,6 +350,8 @@ class HomeChargerStartButton(HomeChargerBaseButton):
         """Start charging."""
         try:
             await self._api.start_home_charger()
+            # 等待充电桩状态变化后再刷新
+            await asyncio.sleep(3)
             await self.coordinator.async_request_refresh()
         except Exception as err:
             _LOGGER.error("开始充电失败: %s", err)
@@ -369,6 +372,8 @@ class HomeChargerStopButton(HomeChargerBaseButton):
         """Stop charging."""
         try:
             await self._api.stop_home_charger()
+            # 等待充电桩状态变化后再刷新
+            await asyncio.sleep(3)
             await self.coordinator.async_request_refresh()
         except Exception as err:
             _LOGGER.error("停止充电失败: %s", err)

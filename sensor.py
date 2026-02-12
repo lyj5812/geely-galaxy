@@ -65,6 +65,10 @@ async def async_setup_entry(
         GeelyLastChargeEnergySensor(coordinator, entry),
     ]
 
+    # 如果有家用充电桩，添加充电记录传感器
+    if coordinator.data and coordinator.data.get("home_charger_list"):
+        entities.append(HomeChargerRecordsSensor(coordinator, entry))
+
     async_add_entities(entities)
 
 
@@ -165,6 +169,13 @@ class GeelyBaseSensor(CoordinatorEntity, SensorEntity):
         if not self.coordinator.data:
             return {}
         return self.coordinator.data.get("home_charger_last_record", {})
+
+    @property
+    def home_charger_records(self) -> list[dict[str, Any]]:
+        """Get home charger records from coordinator data."""
+        if not self.coordinator.data:
+            return []
+        return self.coordinator.data.get("home_charger_records", [])
 
 
 class GeelyVehicleModelSensor(GeelyBaseSensor):
@@ -528,13 +539,13 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
             if status is not None:
                 status_map = {
                     0: "空闲",
-                    1: "充电中",
-                    2: "充电完成",
-                    3: "故障",
+                    1: "已插枪",
+                    2: "充电中",
+                    4: "充电完成",
                     "0": "空闲",
-                    "1": "充电中",
-                    "2": "充电完成",
-                    "3": "故障",
+                    "1": "已插枪",
+                    "2": "充电中",
+                    "4": "充电完成",
                 }
                 result = status_map.get(status, f"状态({status})")
                 _LOGGER.warning("[诊断] 充电状态传感器返回: %s", result)
@@ -562,10 +573,12 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
     @property
     def icon(self) -> str:
         """Return icon based on charging status."""
-        if self.native_value in ("充电中",):
+        if self.native_value == "充电中":
             return "mdi:battery-charging"
-        elif self.native_value in ("充电完成",):
+        elif self.native_value == "充电完成":
             return "mdi:battery-check"
+        elif self.native_value == "已插枪":
+            return "mdi:ev-plug-type2"
         return "mdi:ev-station"
 
     @property
@@ -851,3 +864,76 @@ class GeelyLastChargeEnergySensor(GeelyBaseSensor):
         return attrs
 
 
+class HomeChargerRecordsSensor(GeelyBaseSensor):
+    """Sensor for home charger records."""
+
+    _attr_name = "充电桩充电记录"
+    _attr_icon = "mdi:clipboard-list"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_charger_records"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        """Return device info for the home charger."""
+        charger_status = self.home_charger_status
+        piling_code = charger_status.get("pilingsCode", "unknown")
+        charger_name = charger_status.get("pilingsName", "家用充电桩")
+
+        return {
+            "identifiers": {(DOMAIN, f"charger_{piling_code}")},
+            "name": charger_name,
+            "manufacturer": "吉利汽车",
+            "model": "家用充电桩",
+        }
+
+    @property
+    def native_value(self) -> int:
+        """Return the number of charge records."""
+        return len(self.home_charger_records)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes with full records list."""
+        records = self.home_charger_records
+        if not records:
+            return {"records": []}
+
+        # 格式化记录列表
+        formatted_records = []
+        for i, record in enumerate(records[:10]):  # 最多显示10条
+            formatted_record = {
+                "序号": i + 1,
+            }
+            # API 返回的字段映射
+            field_map = {
+                "startTime": "开始时间",
+                "endTime": "结束时间",
+                "degree": "充电电量(kWh)",
+                "chargeTypeDesc": "充电类型",
+                "chargerName": "充电者",
+            }
+            for key, label in field_map.items():
+                if key in record and record[key] is not None:
+                    formatted_record[label] = record[key]
+
+            formatted_records.append(formatted_record)
+
+        # 统计信息
+        total_energy = 0
+        total_count = len(records)
+        for record in records:
+            # API 返回的充电度数字段是 degree
+            energy = record.get("degree") or 0
+            try:
+                total_energy += float(energy)
+            except (ValueError, TypeError):
+                pass
+
+        return {
+            "total_count": total_count,
+            "total_energy_kwh": round(total_energy, 2),
+            "records": formatted_records,
+        }
