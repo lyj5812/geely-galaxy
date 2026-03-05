@@ -330,7 +330,7 @@ CAPTCHA_HTML = r"""<!DOCTYPE html>
         <div id="debug-log"></div>
     </div>
 
-    <script src="/api/geely_galaxy/gt/www/gt4.js"></script>
+    <script src="https://captcha4.geely.com/www/gt4.js"></script>
     <script>
         var CAPTCHA_ID = "__CAPTCHA_ID__";
         var flowId = "__FLOW_ID__";
@@ -380,23 +380,23 @@ CAPTCHA_HTML = r"""<!DOCTYPE html>
             });
         }
 
-        // GeeTest SDK API 请求经 /api/geely_galaxy/gt/ 代理到 captcha4.geely.com
-        var proxyServer = window.location.host + "/api/geely_galaxy/gt";
+        // 浏览器直连 captcha4.geely.com（SDK 使用 JSONP，无 CORS 问题）
+        var captchaServer = "captcha4.geely.com";
 
         // 兼容吉利自定义 SDK (initGeetest) 和标准 v4 CDN SDK (initGeetest4)
         var initFn = (typeof initGeetest === "function") ? initGeetest
                    : (typeof initGeetest4 === "function") ? initGeetest4
                    : null;
         debugLog("SDK initGeetest=" + (typeof initGeetest) + ", initGeetest4=" + (typeof initGeetest4));
-        debugLog("代理路径: " + proxyServer);
+        debugLog("captchaServer: " + captchaServer);
         debugLog("flow_id: " + flowId);
 
         if (initFn) {
             var opts = {
                 captchaId: CAPTCHA_ID,
                 language: "zho",
-                protocol: window.location.protocol + "//",
-                apiServers: [proxyServer],
+                protocol: "https://",
+                apiServers: [captchaServer],
                 onError: function(e) {
                     debugLog("onError: " + JSON.stringify(e));
                     showError("验证码加载失败: " + (e.msg || e.desc || JSON.stringify(e)));
