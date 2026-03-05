@@ -364,13 +364,18 @@ CAPTCHA_HTML = r"""<!DOCTYPE html>
             });
         }
 
-        // GeeTest SDK 通过内置代理加载，所有请求经 /api/geely_galaxy/gt/ 转发到 captcha4.geely.com
+        // GeeTest SDK API 请求经 /api/geely_galaxy/gt/ 代理到 captcha4.geely.com
         var proxyServer = window.location.host + "/api/geely_galaxy/gt";
-        debugLog("SDK loaded: " + (typeof initGeetest));
+
+        // 兼容吉利自定义 SDK (initGeetest) 和标准 v4 CDN SDK (initGeetest4)
+        var initFn = (typeof initGeetest === "function") ? initGeetest
+                   : (typeof initGeetest4 === "function") ? initGeetest4
+                   : null;
+        debugLog("SDK initGeetest=" + (typeof initGeetest) + ", initGeetest4=" + (typeof initGeetest4));
         debugLog("代理路径: " + proxyServer);
         debugLog("flow_id: " + flowId);
 
-        if (typeof initGeetest === "function") {
+        if (initFn) {
             var opts = {
                 captchaId: CAPTCHA_ID,
                 language: "zho",
@@ -384,7 +389,7 @@ CAPTCHA_HTML = r"""<!DOCTYPE html>
             debugLog("初始化参数: " + JSON.stringify({captchaId: opts.captchaId, apiServers: opts.apiServers}));
 
             try {
-                initGeetest(opts, function(captchaObj) {
+                initFn(opts, function(captchaObj) {
                     debugLog("initGeetest 回调已触发");
                     document.getElementById("status-loading").style.display = "none";
                     captchaObj.appendTo("#captcha");
@@ -404,7 +409,7 @@ CAPTCHA_HTML = r"""<!DOCTYPE html>
             }
         } else {
             showError("GeeTest SDK 加载失败");
-            debugLog("initGeetest 未定义，gt4.js 可能加载失败。请检查 /api/geely_galaxy/gt/www/gt4.js 是否可访问。");
+            debugLog("initGeetest 和 initGeetest4 均未定义，gt4.js 可能未正确加载。");
         }
     </script>
 </body>
