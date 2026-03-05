@@ -1,8 +1,6 @@
 """Config flow for Geely Galaxy integration."""
 from __future__ import annotations
 
-import base64
-import json
 import logging
 import uuid
 from typing import Any
@@ -10,6 +8,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 
@@ -48,18 +47,69 @@ STEP_PASSWORD_SCHEMA = vol.Schema(
     }
 )
 
-STEP_CAPTCHA_SCHEMA = vol.Schema(
-    {
-        vol.Required("captcha_code"): str,
-    }
-)
-
 STEP_SMS_CODE_SCHEMA = vol.Schema(
     {
         vol.Required("sms_code"): str,
     }
 )
 
+
+# ==================== 验证码回调 HTTP 视图 ====================
+
+class GeelyCaptchaCallbackView(HomeAssistantView):
+    """接收 GeeTest 验证码页面的回调结果。
+
+    验证码页面完成滑块验证后，自动 POST 结果到此端点，
+    无需用户手动复制粘贴验证码。
+    """
+
+    url = "/api/geely_galaxy/captcha_callback"
+    name = "api:geely_galaxy:captcha_callback"
+    requires_auth = False  # flow_id 本身作为一次性凭证
+
+    async def post(self, request):
+        """Handle POST with captcha result."""
+        hass = request.app["hass"]
+        try:
+            data = await request.json()
+        except Exception:
+            return self.json_message("Invalid JSON", status_code=400)
+
+        flow_id = data.get("flow_id")
+        captcha_data = data.get("captcha_data")
+
+        if not flow_id or not captcha_data:
+            return self.json_message("Missing data", status_code=400)
+
+        required_keys = ["lot_number", "captcha_output", "pass_token", "gen_time"]
+        if not all(k in captcha_data for k in required_keys):
+            return self.json_message("Invalid captcha data", status_code=400)
+
+        # 存储验证码结果，供 config flow 步骤读取
+        hass.data.setdefault(DOMAIN, {})
+        hass.data[DOMAIN].setdefault("captcha_results", {})
+        hass.data[DOMAIN]["captcha_results"][flow_id] = captcha_data
+
+        # 推进 config flow 到下一步
+        try:
+            await hass.config_entries.flow.async_configure(flow_id=flow_id)
+        except Exception as err:
+            _LOGGER.error("推进配置流程失败 %s: %s", flow_id, err)
+            return self.json_message(str(err), status_code=500)
+
+        return self.json({"success": True})
+
+
+def _ensure_captcha_view(hass: HomeAssistant) -> None:
+    """注册验证码回调视图（仅首次调用时注册）。"""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if not domain_data.get("captcha_view_registered"):
+        domain_data["captcha_results"] = {}
+        domain_data["captcha_view_registered"] = True
+        hass.http.register_view(GeelyCaptchaCallbackView())
+
+
+# ==================== 辅助函数 ====================
 
 async def validate_token_input(
     hass: HomeAssistant, data: dict[str, Any]
@@ -103,6 +153,8 @@ async def _do_login_and_get_info(
     return {"title": "吉利银河", "vin": ""}
 
 
+# ==================== Config Flow ====================
+
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Geely Galaxy."""
 
@@ -115,6 +167,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._device_sn: str = ""
         self._certify_id: str = ""
         self._login_method: str = ""
+        self._captcha_data: dict | None = None
+
+    def _get_captcha_data(self) -> dict | None:
+        """读取并消费本次 flow 的验证码结果。"""
+        results = self.hass.data.get(DOMAIN, {}).get("captcha_results", {})
+        return results.pop(self.flow_id, None)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -153,70 +211,30 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_sms_captcha(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 2: Solve GeeTest captcha, then send SMS code."""
-        errors: dict[str, str] = {}
+        """Step 2: 外部步骤 - GeeTest 滑块验证。
 
-        if user_input is not None:
-            captcha_code = user_input.get("captcha_code", "").strip()
+        验证码页面完成后会自动回调，推进到下一步。
+        """
+        _ensure_captcha_view(self.hass)
 
-            try:
-                decoded = json.loads(
-                    base64.b64decode(captcha_code).decode("utf-8")
-                )
-            except Exception:
-                errors["base"] = "invalid_captcha"
-                return self.async_show_form(
-                    step_id="sms_captcha",
-                    data_schema=STEP_CAPTCHA_SCHEMA,
-                    errors=errors,
-                )
+        captcha_data = self._get_captcha_data()
+        if captcha_data:
+            self._captcha_data = captcha_data
+            return self.async_external_step_done(next_step_id="sms_code")
 
-            required_keys = ["lot_number", "captcha_output", "pass_token", "gen_time"]
-            if not all(k in decoded for k in required_keys):
-                errors["base"] = "invalid_captcha"
-                return self.async_show_form(
-                    step_id="sms_captcha",
-                    data_schema=STEP_CAPTCHA_SCHEMA,
-                    errors=errors,
-                )
-
-            api = GeelyGalaxyApi(refresh_token="", device_sn=self._device_sn)
-            try:
-                self._certify_id = await api.validate_geetest(
-                    lot_number=decoded["lot_number"],
-                    captcha_output=decoded["captcha_output"],
-                    pass_token=decoded["pass_token"],
-                    gen_time=decoded["gen_time"],
-                )
-
-                await api.send_sms_code(
-                    phone=self._phone,
-                    certify_id=self._certify_id,
-                )
-            except GeelyApiError as err:
-                _LOGGER.error("发送验证码失败: %s", err)
-                errors["base"] = "sms_send_failed"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
-            else:
-                return await self.async_step_sms_code()
-            finally:
-                await api.close()
-
-        return self.async_show_form(
+        return self.async_external_step(
             step_id="sms_captcha",
-            data_schema=STEP_CAPTCHA_SCHEMA,
-            errors=errors,
+            url=f"/local/geely_captcha.html?flow_id={self.flow_id}",
         )
 
     async def async_step_sms_code(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 3: Enter SMS verification code."""
+        """Step 3: 验证 GeeTest → 发送短信 → 输入验证码。"""
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            # 用户提交了短信验证码 → 验证并登录
             sms_code = user_input.get("sms_code", "").strip()
 
             api = GeelyGalaxyApi(refresh_token="", device_sn=self._device_sn)
@@ -251,6 +269,31 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
             finally:
                 await api.close()
+
+        elif self._captcha_data:
+            # 首次进入（从验证码步骤跳转来）→ 校验 GeeTest 并发送短信
+            api = GeelyGalaxyApi(refresh_token="", device_sn=self._device_sn)
+            try:
+                self._certify_id = await api.validate_geetest(
+                    lot_number=self._captcha_data["lot_number"],
+                    captcha_output=self._captcha_data["captcha_output"],
+                    pass_token=self._captcha_data["pass_token"],
+                    gen_time=self._captcha_data["gen_time"],
+                )
+
+                await api.send_sms_code(
+                    phone=self._phone,
+                    certify_id=self._certify_id,
+                )
+            except GeelyApiError as err:
+                _LOGGER.error("发送验证码失败: %s", err)
+                errors["base"] = "sms_send_failed"
+            except Exception:
+                _LOGGER.exception("Unexpected exception")
+                errors["base"] = "unknown"
+            finally:
+                await api.close()
+            self._captcha_data = None
 
         return self.async_show_form(
             step_id="sms_code",
@@ -288,7 +331,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ==================== 密码登录（需要预加密密码）====================
+    # ==================== 密码登录 ====================
 
     async def async_step_password(
         self, user_input: dict[str, Any] | None = None
@@ -309,75 +352,69 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_captcha(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle captcha step for password login."""
+        """外部步骤 - GeeTest 滑块验证（密码登录流程）。"""
+        _ensure_captcha_view(self.hass)
+
+        captcha_data = self._get_captcha_data()
+        if captcha_data:
+            self._captcha_data = captcha_data
+            return self.async_external_step_done(next_step_id="pwd_login")
+
+        return self.async_external_step(
+            step_id="captcha",
+            url=f"/local/geely_captcha.html?flow_id={self.flow_id}",
+        )
+
+    async def async_step_pwd_login(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """校验验证码并执行密码登录。"""
         errors: dict[str, str] = {}
 
-        if user_input is not None:
-            captcha_code = user_input.get("captcha_code", "").strip()
+        api = GeelyGalaxyApi(refresh_token="", device_sn=self._device_sn)
+        try:
+            certify_id = await api.validate_geetest(
+                lot_number=self._captcha_data["lot_number"],
+                captcha_output=self._captcha_data["captcha_output"],
+                pass_token=self._captcha_data["pass_token"],
+                gen_time=self._captcha_data["gen_time"],
+            )
+            self._captcha_data = None
 
-            try:
-                decoded = json.loads(
-                    base64.b64decode(captcha_code).decode("utf-8")
-                )
-            except Exception:
-                errors["base"] = "invalid_captcha"
-                return self.async_show_form(
-                    step_id="captcha",
-                    data_schema=STEP_CAPTCHA_SCHEMA,
-                    errors=errors,
-                )
+            tokens = await api.password_login(
+                phone=self._phone,
+                password=self._password,
+                certify_id=certify_id,
+            )
 
-            required_keys = ["lot_number", "captcha_output", "pass_token", "gen_time"]
-            if not all(k in decoded for k in required_keys):
-                errors["base"] = "invalid_captcha"
-                return self.async_show_form(
-                    step_id="captcha",
-                    data_schema=STEP_CAPTCHA_SCHEMA,
-                    errors=errors,
-                )
+            info = await _do_login_and_get_info(api)
 
-            api = GeelyGalaxyApi(refresh_token="", device_sn=self._device_sn)
-            try:
-                certify_id = await api.validate_geetest(
-                    lot_number=decoded["lot_number"],
-                    captcha_output=decoded["captcha_output"],
-                    pass_token=decoded["pass_token"],
-                    gen_time=decoded["gen_time"],
-                )
+            if info.get("vin"):
+                await self.async_set_unique_id(info["vin"])
+                self._abort_if_unique_id_configured()
 
-                tokens = await api.password_login(
-                    phone=self._phone,
-                    password=self._password,
-                    certify_id=certify_id,
-                )
+            entry_data = {
+                CONF_REFRESH_TOKEN: tokens["refresh_token"],
+                CONF_DEVICE_SN: self._device_sn,
+            }
+            return self.async_create_entry(
+                title=info["title"], data=entry_data
+            )
+        except GeelyAuthError as err:
+            _LOGGER.error("Password login failed: %s", err)
+            errors["base"] = "invalid_auth"
+        except GeelyApiError as err:
+            _LOGGER.error("API error: %s", err)
+            errors["base"] = "cannot_connect"
+        except Exception:
+            _LOGGER.exception("Unexpected exception")
+            errors["base"] = "unknown"
+        finally:
+            await api.close()
 
-                info = await _do_login_and_get_info(api)
-
-                if info.get("vin"):
-                    await self.async_set_unique_id(info["vin"])
-                    self._abort_if_unique_id_configured()
-
-                entry_data = {
-                    CONF_REFRESH_TOKEN: tokens["refresh_token"],
-                    CONF_DEVICE_SN: self._device_sn,
-                }
-                return self.async_create_entry(
-                    title=info["title"], data=entry_data
-                )
-            except GeelyAuthError as err:
-                _LOGGER.error("Password login failed: %s", err)
-                errors["base"] = "invalid_auth"
-            except GeelyApiError as err:
-                _LOGGER.error("API error: %s", err)
-                errors["base"] = "cannot_connect"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
-            finally:
-                await api.close()
-
+        # 登录失败 → 返回密码输入页面并显示错误
         return self.async_show_form(
-            step_id="captcha",
-            data_schema=STEP_CAPTCHA_SCHEMA,
+            step_id="password",
+            data_schema=STEP_PASSWORD_SCHEMA,
             errors=errors,
         )

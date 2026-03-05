@@ -19,10 +19,7 @@
       },
       "sms_captcha": {
         "title": "安全验证",
-        "description": "请完成以下步骤：\n1. 在浏览器中打开 Home Assistant 地址 + `/local/geely_captcha.html`\n   例如：http://homeassistant.local:8123/local/geely_captcha.html\n2. 完成滑块验证\n3. 点击「复制验证码」\n4. 粘贴到下方输入框\n\n完成后将自动发送短信验证码到您的手机。",
-        "data": {
-          "captcha_code": "验证码"
-        }
+        "description": "请在弹出的页面中完成滑块验证。\n验证完成后将自动返回此页面继续操作。"
       },
       "sms_code": {
         "title": "输入短信验证码",
@@ -49,10 +46,7 @@
       },
       "captcha": {
         "title": "安全验证",
-        "description": "请完成以下步骤：\n1. 在浏览器中打开 Home Assistant 地址 + `/local/geely_captcha.html`\n   例如：http://homeassistant.local:8123/local/geely_captcha.html\n2. 完成滑块验证\n3. 点击「复制验证码」\n4. 粘贴到下方输入框",
-        "data": {
-          "captcha_code": "验证码"
-        }
+        "description": "请在弹出的页面中完成滑块验证。\n验证完成后将自动返回此页面继续操作。"
       }
     },
     "error": {
