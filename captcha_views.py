@@ -131,10 +131,16 @@ class GeeTestProxyView(HomeAssistantView):
 
         proxy_base = f"{request.scheme}://{request.host}/api/geely_galaxy/gt"
 
-        headers = {
-            "Host": GEETEST_HOST,
-            "Accept-Encoding": "gzip",
-        }
+        # 转发浏览器请求头（参考 captcha_proxy.py）
+        headers = {}
+        skip_headers = {"host", "connection", "accept-encoding"}
+        for key, value in request.headers.items():
+            if key.lower() in skip_headers:
+                continue
+            headers[key] = value
+        headers["Host"] = GEETEST_HOST
+        headers["Accept-Encoding"] = "gzip"
+
         body = await request.read() if method == "POST" else None
 
         try:
