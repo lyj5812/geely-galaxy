@@ -42,10 +42,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     cached_vin: str | None = None
     cached_vehicle_info: dict = {}
 
+    # 记录初始 refresh_token，用于检测是否需要持久化新 token
+    last_saved_refresh_token = entry.data.get(CONF_REFRESH_TOKEN, "")
+
     async def async_update_data():
         """Fetch data from API."""
-        nonlocal cached_vin, cached_vehicle_info
+        nonlocal cached_vin, cached_vehicle_info, last_saved_refresh_token
         try:
+            # 检查 refresh_token 是否已更新，若有变化则持久化到配置
+            current_refresh_token = api._refresh_token
+            if (
+                current_refresh_token
+                and current_refresh_token != last_saved_refresh_token
+            ):
+                new_data = {**entry.data, CONF_REFRESH_TOKEN: current_refresh_token}
+                hass.config_entries.async_update_entry(entry, data=new_data)
+                last_saved_refresh_token = current_refresh_token
+                _LOGGER.info("已自动保存新的 refreshToken 到配置")
+
             # 只在首次或缓存为空时获取车辆列表
             if not cached_vin:
                 vehicles = await api.get_vehicle_list()

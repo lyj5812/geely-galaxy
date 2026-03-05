@@ -5,6 +5,14 @@ DOMAIN = "geely_galaxy"
 # 配置键
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_DEVICE_SN = "device_sn"
+CONF_PHONE = "phone"
+CONF_PASSWORD = "password"
+CONF_LOGIN_METHOD = "login_method"
+
+# 登录方式
+LOGIN_METHOD_SMS = "sms"
+LOGIN_METHOD_PASSWORD = "password"
+LOGIN_METHOD_TOKEN = "token"
 
 # 默认值
 DEFAULT_SCAN_INTERVAL = 60  # 60秒更新一次

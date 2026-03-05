@@ -10,6 +10,7 @@ import base64
 import uuid
 import json
 import logging
+import time
 from typing import Any
 from datetime import datetime, timezone
 import aiohttp
@@ -71,6 +72,8 @@ class GeelyGalaxyApi:
         self._device_sn = device_sn
         self._session = session
         self._token: str | None = None
+        self._token_expire_at: float = 0  # access token 过期时间戳（秒）
+        self._refresh_token_expire_at: float = 0  # refresh token 过期时间戳（秒）
         self._recharge_auth_token: str | None = None  # 充电服务 authToken
         self._own_session = False
         self._vehicle_info: dict = {}
@@ -218,7 +221,7 @@ class GeelyGalaxyApi:
             "deviceSN": self._device_sn,
             "txCookie": "",
             "appId": "galaxy-app",
-            "appVersion": "1.45.0",
+            "appVersion": "1.46.0",
             "platform": "Android",
             "Cache-Control": "no-cache",
             "Connection": "Keep-Alive",
@@ -229,11 +232,19 @@ class GeelyGalaxyApi:
         if app_key == APP_KEYS["user"]:
             headers["usetoken"] = "true"
             headers["host"] = API_HOSTS["user"]
-            headers["taenantid"] = "569001701001"
+            headers["tenantid"] = "569001701001"
             headers["svcsid"] = ""
             # 用户 API 的签名头顺序必须是字母顺序
             headers["x-ca-signature-headers"] = "x-ca-key,x-ca-nonce,x-ca-timestamp"
             del headers["x-refresh-token"]
+            # 设备信息头（与测试脚本一致）
+            headers["gl_dev_id"] = self._device_sn
+            headers["gl_dev_model"] = "HomeAssistant"
+            headers["gl_dev_brand"] = "HomeAssistant"
+            headers["gl_dev_platform"] = "android"
+            headers["gl_app_version"] = "1.46.0"
+            headers["gl_os_version"] = "33"
+            headers["gl_app_build"] = "146000098"
 
         # 与测试脚本一致：只在有 token 时才设置 token header
         if self._token:
@@ -253,6 +264,10 @@ class GeelyGalaxyApi:
         if app_key == APP_KEYS["vc"]:
             signature_headers = "x-ca-appcode,x-ca-nonce,x-ca-timestamp,x-ca-key"
             app_code = "usp-gateway-code"
+        elif app_key == APP_KEYS["user"]:
+            # 用户 API 使用字母顺序（与测试脚本一致）
+            signature_headers = "x-ca-key,x-ca-nonce,x-ca-timestamp"
+            app_code = None
         else:
             signature_headers = "x-ca-nonce,x-ca-key,x-ca-timestamp"
             app_code = None
@@ -287,10 +302,10 @@ class GeelyGalaxyApi:
             "deviceSN": self._device_sn,
             "txCookie": "",
             "appId": "galaxy-app",
-            "appVersion": "1.45.0",
+            "appVersion": "1.46.0",
             "platform": "Android",
             "Cache-Control": "no-cache",
-            "sweet_security_info": '{"appVersion":"1.45.0","platform":"android"}',
+            "sweet_security_info": '{"appVersion":"1.46.0","platform":"android"}',
             "methodtype": "6",
             "contenttype": "application/json",
             "Content-Type": "application/json; charset=utf-8",
@@ -302,9 +317,17 @@ class GeelyGalaxyApi:
         if app_key == APP_KEYS["user"]:
             headers["usetoken"] = "true"
             headers["host"] = API_HOSTS["user"]
-            headers["taenantid"] = "569001701001"
+            headers["tenantid"] = "569001701001"
             headers["svcsid"] = ""
             del headers["x-refresh-token"]
+            # 设备信息头（与测试脚本一致）
+            headers["gl_dev_id"] = self._device_sn
+            headers["gl_dev_model"] = "HomeAssistant"
+            headers["gl_dev_brand"] = "HomeAssistant"
+            headers["gl_dev_platform"] = "android"
+            headers["gl_app_version"] = "1.46.0"
+            headers["gl_os_version"] = "33"
+            headers["gl_app_build"] = "146000098"
         elif app_key == APP_KEYS["vc"]:
             headers["host"] = API_HOSTS["vc"]
         else:
@@ -348,10 +371,36 @@ class GeelyGalaxyApi:
                 token_data = data.get("data", {}).get("centerTokenDto", {})
                 self._token = token_data.get("token")
 
+                # 记录 token 过期时间
+                expire_at = token_data.get("expireAt")
+                if expire_at:
+                    # expireAt 是毫秒时间戳
+                    self._token_expire_at = expire_at / 1000
+                    _LOGGER.debug(
+                        "Token 将在 %s 过期",
+                        datetime.fromtimestamp(self._token_expire_at).isoformat(),
+                    )
+                else:
+                    # 没有过期时间信息，默认 1.5 小时后过期
+                    self._token_expire_at = time.time() + 5400
+
                 # 更新 refresh token（如果返回了新的）
                 new_refresh_token = token_data.get("refreshToken")
                 if new_refresh_token:
                     self._refresh_token = new_refresh_token
+
+                # 记录 refresh token 过期时间
+                refresh_expire_at = token_data.get("refreshExpireAt")
+                if refresh_expire_at:
+                    self._refresh_token_expire_at = refresh_expire_at / 1000
+                    remaining_days = (self._refresh_token_expire_at - time.time()) / 86400
+                    if remaining_days < 7:
+                        _LOGGER.warning(
+                            "RefreshToken 将在 %.1f 天后过期，届时需要重新登录",
+                            remaining_days,
+                        )
+                    elif remaining_days < 0:
+                        _LOGGER.error("RefreshToken 已过期！请重新配置集成以重新登录")
 
                 if not self._token:
                     raise GeelyAuthError("No token in response")
@@ -362,10 +411,34 @@ class GeelyGalaxyApi:
         except aiohttp.ClientError as err:
             raise GeelyApiError(f"Connection error: {err}") from err
 
-    async def get_vehicle_list(self) -> list[dict[str, Any]]:
-        """Get list of vehicles."""
+    def _is_token_expired(self) -> bool:
+        """检查 access token 是否已过期或即将过期（提前 5 分钟）。"""
         if not self._token:
+            return True
+        # 提前 300 秒（5 分钟）刷新，避免请求过程中过期
+        return time.time() >= (self._token_expire_at - 300)
+
+    async def _ensure_token(self) -> None:
+        """确保有有效的 access token，过期则自动刷新。"""
+        if self._is_token_expired():
+            _LOGGER.info("Token 已过期或即将过期，自动刷新...")
             await self.refresh_access_token()
+
+    @staticmethod
+    def _is_auth_error(code: Any, msg: str) -> bool:
+        """判断 API 错误是否为认证/token 相关错误。"""
+        msg_lower = str(msg).lower()
+        # 常见 token 无效错误标识
+        if any(kw in msg_lower for kw in ("token", "unauthorized", "登录", "认证", "expired", "过期")):
+            return True
+        # 特定错误码
+        if str(code) in ("401", "403", "A00004", "A00005"):
+            return True
+        return False
+
+    async def get_vehicle_list(self, *, _retried: bool = False) -> list[dict[str, Any]]:
+        """Get list of vehicles."""
+        await self._ensure_token()
 
         session = await self._ensure_session()
         path = "/vc/app/v1/vehicle/control/myList"
@@ -386,10 +459,13 @@ class GeelyGalaxyApi:
                 data = json.loads(response_text)
                 code = data.get("code")
                 if code not in (0, "0", "success"):
+                    msg = data.get("msg", data.get("message", response_text[:200]))
+                    if not _retried and self._is_auth_error(code, msg):
+                        _LOGGER.info("车辆列表 token 无效，刷新后重试...")
+                        await self.refresh_access_token()
+                        return await self.get_vehicle_list(_retried=True)
                     _LOGGER.error("Vehicle list failed: %s", response_text[:500])
-                    raise GeelyApiError(
-                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
-                    )
+                    raise GeelyApiError(f"API error (code={code}): {msg}")
 
                 vehicles = data.get("data", [])
                 if vehicles:
@@ -401,8 +477,7 @@ class GeelyGalaxyApi:
 
     async def _ensure_vin(self, vin: str | None) -> str:
         """确保有可用的 VIN。"""
-        if not self._token:
-            await self.refresh_access_token()
+        await self._ensure_token()
 
         if not vin and self._vehicle_info:
             vin = self._vehicle_info.get("vin")
@@ -488,42 +563,15 @@ class GeelyGalaxyApi:
     async def get_switch_status(self, vin: str | None = None) -> dict[str, Any]:
         """Get vehicle switch status (sentry mode, etc)."""
         vin = await self._ensure_vin(vin)
-        session = await self._ensure_session()
-        path = "/vc/app/v1/vehicle/switch/status"
-        url = f"https://{API_HOSTS['vc']}{path}"
-        body = json.dumps({
+        return await self._vc_post("/vc/app/v1/vehicle/switch/status", {
             "clientType": 2,
             "udid": None,
             "vin": vin,
-        }, separators=(",", ":"))
-        headers = self._build_post_headers(APP_KEYS["vc"], path, body)
-
-        _LOGGER.debug("Calling get_switch_status: %s, vin=%s", url, vin)
-        try:
-            async with session.post(url, data=body, headers=headers) as response:
-                response_text = await response.text()
-                _LOGGER.debug("Switch status response: %s", response_text)
-
-                if response.status != 200:
-                    _LOGGER.error("Switch status HTTP %s: %s", response.status, response_text[:500])
-                    raise GeelyApiError(f"API request failed: HTTP {response.status}")
-
-                data = json.loads(response_text)
-                code = data.get("code")
-                if code not in (0, "0", "success"):
-                    raise GeelyApiError(
-                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
-                    )
-
-                return data.get("data") or {}
-
-        except aiohttp.ClientError as err:
-            raise GeelyApiError(f"Connection error: {err}") from err
+        })
 
     async def get_user_points(self) -> dict[str, Any]:
         """Get user points (for sign-in tracking)."""
-        if not self._token:
-            await self.refresh_access_token()
+        await self._ensure_token()
 
         session = await self._ensure_session()
         path = "/api/v1/point/info"
@@ -544,8 +592,12 @@ class GeelyGalaxyApi:
         except aiohttp.ClientError as err:
             raise GeelyApiError(f"Connection error: {err}") from err
 
-    async def _vc_post(self, path: str, body_dict: dict) -> dict[str, Any]:
-        """通用 USP 网关 POST 请求。"""
+    async def _vc_post(
+        self, path: str, body_dict: dict, *, _retried: bool = False
+    ) -> dict[str, Any]:
+        """通用 USP 网关 POST 请求，token 过期自动重试。"""
+        await self._ensure_token()
+
         session = await self._ensure_session()
         url = f"https://{API_HOSTS['vc']}{path}"
         body = json.dumps(body_dict, separators=(",", ":"))
@@ -563,9 +615,13 @@ class GeelyGalaxyApi:
                 data = json.loads(response_text)
                 code = data.get("code")
                 if code not in (0, "0", "success"):
-                    raise GeelyApiError(
-                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
-                    )
+                    msg = data.get("msg", data.get("message", response_text[:200]))
+                    # token 无效时刷新后重试一次
+                    if not _retried and self._is_auth_error(code, msg):
+                        _LOGGER.info("vc POST %s token 无效，刷新后重试...", path)
+                        await self.refresh_access_token()
+                        return await self._vc_post(path, body_dict, _retried=True)
+                    raise GeelyApiError(f"API error (code={code}): {msg}")
 
                 return data.get("data") or {}
         except aiohttp.ClientError as err:
@@ -690,6 +746,269 @@ class GeelyGalaxyApi:
             _LOGGER.debug("获取充电预约设置失败: %s", err)
             return {}
 
+    async def validate_geetest(
+        self, lot_number: str, captcha_output: str, pass_token: str, gen_time: str
+    ) -> str:
+        """调用吉利后端校验极验验证码结果。
+
+        Args:
+            lot_number: 极验返回的 lot_number
+            captcha_output: 极验返回的 captcha_output
+            pass_token: 极验返回的 pass_token
+            gen_time: 极验返回的 gen_time
+
+        Returns:
+            certifyId（优先使用服务端返回的值，否则回退到 lot_number）
+        """
+        session = await self._ensure_session()
+
+        body_dict = {
+            "lotNumber": lot_number,
+            "captchaOutput": captcha_output,
+            "passToken": pass_token,
+            "genTime": gen_time,
+            "captchaId": "2baef8ee692c27f1c8a0632e560242d7",
+        }
+
+        path = "/api/v1/security/geeTestV4/validate"
+        url = f"https://{API_HOSTS['user']}{path}"
+        body = json.dumps(body_dict, separators=(",", ":"))
+        headers = self._build_post_headers(APP_KEYS["user"], path, body)
+
+        _LOGGER.debug("Calling validate_geetest: %s", url)
+        try:
+            async with session.post(url, data=body, headers=headers) as response:
+                response_text = await response.text()
+                _LOGGER.debug("GeeTest validate response: %s", response_text)
+
+                if response.status != 200:
+                    _LOGGER.error(
+                        "GeeTest validate HTTP %s: %s",
+                        response.status,
+                        response_text[:500],
+                    )
+                    raise GeelyApiError(f"验证码校验失败: HTTP {response.status}")
+
+                data = json.loads(response_text)
+                code = data.get("code")
+
+                if code not in ("success", 0, "0"):
+                    msg = data.get("msg", data.get("message", "未知错误"))
+                    _LOGGER.error("GeeTest validate failed: %s", response_text[:500])
+                    raise GeelyApiError(f"验证码校验失败: {msg}")
+
+                # 从响应中提取 certifyId，如果没有则回退到 lot_number
+                certify_id = lot_number
+                validate_data = data.get("data")
+                if validate_data and isinstance(validate_data, dict) and validate_data.get("certifyId"):
+                    certify_id = validate_data["certifyId"]
+
+                _LOGGER.info("极验验证码校验成功, certifyId: %s", certify_id)
+                return certify_id
+
+        except aiohttp.ClientError as err:
+            raise GeelyApiError(f"连接错误: {err}") from err
+
+    async def password_login(
+        self, phone: str, password: str, certify_id: str
+    ) -> dict[str, str]:
+        """使用手机号+密码登录。
+
+        密码加密方式为白盒 SM4 (ECB)，由 APP 内 libwhite-box.so 实现，
+        密钥嵌入白盒查找表中无法直接提取。
+        因此 password 参数应传入已加密的密码 hex 字符串（通过抓包或 Frida 获取）。
+
+        Args:
+            phone: 手机号
+            password: 已加密的密码（白盒SM4 hex字符串，32字符）
+            certify_id: 极验验证码的 lot_number
+
+        Returns:
+            包含 token 和 refresh_token 的字典
+        """
+        session = await self._ensure_session()
+
+        encrypted_password = password
+
+        # 生成 deviceId
+        device_id = hashlib.md5(self._device_sn.encode("utf-8")).hexdigest()
+
+        body_dict = {
+            "deviceType": "android",
+            "appVersion": "1.46.0",
+            "password": encrypted_password,
+            "mobile": phone,
+            "deviceModel": "HomeAssistant",
+            "deviceId": device_id,
+            "certifyId": certify_id,
+        }
+
+        path = "/api/v1/login/pwdLogin"
+        url = f"https://{API_HOSTS['user']}{path}"
+        body = json.dumps(body_dict, separators=(",", ":"))
+        headers = self._build_post_headers(APP_KEYS["user"], path, body)
+
+        _LOGGER.debug("Calling password_login: %s", url)
+        try:
+            async with session.post(url, data=body, headers=headers) as response:
+                response_text = await response.text()
+                _LOGGER.debug("Password login response: %s", response_text)
+
+                if response.status != 200:
+                    _LOGGER.error(
+                        "Password login HTTP %s: %s",
+                        response.status,
+                        response_text[:500],
+                    )
+                    raise GeelyAuthError(f"登录失败: HTTP {response.status}")
+
+                data = json.loads(response_text)
+                code = data.get("code")
+
+                if code not in ("success", 0, "0"):
+                    msg = data.get("msg", data.get("message", "未知错误"))
+                    _LOGGER.error("Password login failed: %s", response_text[:500])
+                    raise GeelyAuthError(f"登录失败: {msg}")
+
+                token_data = data.get("data", {}).get("centerTokenDto", {})
+                self._token = token_data.get("token")
+                new_refresh_token = token_data.get("refreshToken")
+
+                if not self._token or not new_refresh_token:
+                    raise GeelyAuthError("登录响应中缺少 token 信息")
+
+                self._refresh_token = new_refresh_token
+                _LOGGER.info("密码登录成功")
+
+                return {
+                    "token": self._token,
+                    "refresh_token": self._refresh_token,
+                }
+
+        except aiohttp.ClientError as err:
+            raise GeelyApiError(f"连接错误: {err}") from err
+
+    async def send_sms_code(self, phone: str, certify_id: str) -> bool:
+        """发送短信登录验证码。
+
+        Args:
+            phone: 手机号
+            certify_id: 极验验证码的 lot_number
+
+        Returns:
+            是否发送成功
+        """
+        session = await self._ensure_session()
+
+        body_dict = {
+            "mobile": phone,
+            "certifyId": certify_id,
+        }
+
+        path = "/api/v1/login/sendSms"
+        url = f"https://{API_HOSTS['user']}{path}"
+        body = json.dumps(body_dict, separators=(",", ":"))
+        headers = self._build_post_headers(APP_KEYS["user"], path, body)
+
+        _LOGGER.debug("Calling send_sms_code: %s", url)
+        try:
+            async with session.post(url, data=body, headers=headers) as response:
+                response_text = await response.text()
+                _LOGGER.debug("Send SMS response: %s", response_text)
+
+                if response.status != 200:
+                    raise GeelyApiError(f"发送验证码失败: HTTP {response.status}")
+
+                data = json.loads(response_text)
+                code = data.get("code")
+                msg = data.get("msg", data.get("message", ""))
+
+                if code in ("success", 0, "0"):
+                    _LOGGER.info("短信验证码发送成功")
+                    return True
+
+                if "频繁" in str(msg) or "frequent" in str(msg).lower():
+                    raise GeelyApiError("验证码发送太频繁，请稍后再试")
+
+                raise GeelyApiError(f"发送验证码失败: {msg}")
+
+        except aiohttp.ClientError as err:
+            raise GeelyApiError(f"连接错误: {err}") from err
+
+    async def sms_login(
+        self, phone: str, sms_code: str, certify_id: str
+    ) -> dict[str, str]:
+        """使用手机号+短信验证码登录。
+
+        无需密码加密，适合开源项目使用。
+        mobileCodeLogin 端点使用 query params（非 JSON body）。
+
+        Args:
+            phone: 手机号
+            sms_code: 短信验证码（6位数字）
+            certify_id: 极验验证码的 lot_number
+
+        Returns:
+            包含 token 和 refresh_token 的字典
+        """
+        session = await self._ensure_session()
+
+        device_id = hashlib.md5(self._device_sn.encode("utf-8")).hexdigest()
+
+        # mobileCodeLogin 使用 query params + POST（空body）
+        params = (
+            f"mobile={phone}"
+            f"&verificationCode={sms_code}"
+            f"&certifyId={certify_id}"
+            f"&deviceType=android"
+            f"&appVersion=1.46.0"
+            f"&deviceId={device_id}"
+            f"&deviceModel=HomeAssistant"
+        )
+        path = f"/api/v1/login/mobileCodeLogin?{params}"
+        url = f"https://{API_HOSTS['user']}{path}"
+        body = json.dumps({}, separators=(",", ":"))
+        headers = self._build_post_headers(APP_KEYS["user"], path, body)
+
+        _LOGGER.debug("Calling sms_login: %s", url)
+        try:
+            async with session.post(url, data=body, headers=headers) as response:
+                response_text = await response.text()
+                _LOGGER.debug("SMS login response: %s", response_text)
+
+                if response.status != 200:
+                    _LOGGER.error(
+                        "SMS login HTTP %s: %s",
+                        response.status, response_text[:500],
+                    )
+                    raise GeelyAuthError(f"登录失败: HTTP {response.status}")
+
+                data = json.loads(response_text)
+                code = data.get("code")
+
+                if code not in ("success", 0, "0"):
+                    msg = data.get("msg", data.get("message", "未知错误"))
+                    _LOGGER.error("SMS login failed: %s", response_text[:500])
+                    raise GeelyAuthError(f"登录失败: {msg}")
+
+                token_data = data.get("data", {}).get("centerTokenDto", {})
+                self._token = token_data.get("token")
+                new_refresh_token = token_data.get("refreshToken")
+
+                if not self._token or not new_refresh_token:
+                    raise GeelyAuthError("登录响应中缺少 token 信息")
+
+                self._refresh_token = new_refresh_token
+                _LOGGER.info("短信验证码登录成功")
+
+                return {
+                    "token": self._token,
+                    "refresh_token": self._refresh_token,
+                }
+
+        except aiohttp.ClientError as err:
+            raise GeelyApiError(f"连接错误: {err}") from err
+
     async def test_connection(self) -> bool:
         """Test the API connection."""
         try:
@@ -799,9 +1118,7 @@ class GeelyGalaxyApi:
     async def get_oauth_code(self) -> str:
         """获取充电服务的 OAuth 授权码。"""
         _LOGGER.warning("[诊断] 开始获取 OAuth 授权码...")
-        if not self._token:
-            _LOGGER.warning("[诊断] token 为空，先刷新...")
-            await self.refresh_access_token()
+        await self._ensure_token()
 
         session = await self._ensure_session()
         path = f"/api/v1/oauth2/code?scope=snsapiUserinfo&response_type=code&isDestruction=false&state=1&client_id={RECHARGE_CONFIG['oauth_client_id']}"
@@ -878,8 +1195,10 @@ class GeelyGalaxyApi:
             await self.get_recharge_auth_token()
             _LOGGER.warning("[诊断] 充电服务 authToken 获取成功")
 
-    async def _recharge_post(self, path: str, body_dict: dict) -> dict[str, Any]:
-        """充电服务 POST 请求。"""
+    async def _recharge_post(
+        self, path: str, body_dict: dict, *, _retried: bool = False
+    ) -> dict[str, Any]:
+        """充电服务 POST 请求，token 过期自动重试。"""
         await self._ensure_recharge_auth()
 
         session = await self._ensure_session()
@@ -899,9 +1218,13 @@ class GeelyGalaxyApi:
                 data = json.loads(response_text)
                 code = data.get("code")
                 if code not in (0, "0", 1, "1", 200, "200", "success", "SUCCESS"):
-                    raise GeelyApiError(
-                        f"API error (code={code}): {data.get('msg', data.get('message', response_text[:200]))}"
-                    )
+                    msg = data.get("msg", data.get("message", response_text[:200]))
+                    # 充电服务 token 过期时重新获取 authToken 后重试
+                    if not _retried and self._is_auth_error(code, msg):
+                        _LOGGER.info("充电服务 token 无效，重新获取后重试...")
+                        self._recharge_auth_token = None
+                        return await self._recharge_post(path, body_dict, _retried=True)
+                    raise GeelyApiError(f"API error (code={code}): {msg}")
 
                 return data.get("data") or {}
 
