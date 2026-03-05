@@ -76,10 +76,18 @@ class GeelyCaptchaCallbackView(HomeAssistantView):
 
         # 推进 config flow 到下一步
         try:
-            await hass.config_entries.flow.async_configure(flow_id=flow_id)
+            result = await hass.config_entries.flow.async_configure(
+                flow_id=flow_id
+            )
+            _LOGGER.debug("配置流程推进结果: %s", result.get("type") if isinstance(result, dict) else result)
         except Exception as err:
-            _LOGGER.error("推进配置流程失败 %s: %s", flow_id, err)
-            return self.json_message(str(err), status_code=500)
+            _LOGGER.error(
+                "推进配置流程失败 %s: %s (%s)", flow_id, err, type(err).__name__
+            )
+            return self.json_message(
+                f"{type(err).__name__}: {err}" or "Unknown error",
+                status_code=500,
+            )
 
         return self.json({"success": True})
 
@@ -131,17 +139,25 @@ class GeeTestProxyView(HomeAssistantView):
 
         proxy_base = f"{request.scheme}://{request.host}/api/geely_galaxy/gt"
 
-        # 转发浏览器请求头（参考 captcha_proxy.py）
-        headers = {}
-        skip_headers = {"host", "connection", "accept-encoding"}
-        for key, value in request.headers.items():
-            if key.lower() in skip_headers:
-                continue
-            headers[key] = value
-        headers["Host"] = GEETEST_HOST
-        headers["Accept-Encoding"] = "gzip"
+        # 构造干净的请求头，只传递必要信息（不转发 Cookie/Sec-*/Authorization 等）
+        headers = {
+            "User-Agent": request.headers.get(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            ),
+            "Accept": request.headers.get("Accept", "*/*"),
+            "Accept-Language": request.headers.get(
+                "Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8"
+            ),
+            "Accept-Encoding": "gzip",
+            "Referer": f"https://{GEETEST_HOST}/",
+        }
 
         body = await request.read() if method == "POST" else None
+        if method == "POST":
+            ct = request.headers.get("Content-Type")
+            if ct:
+                headers["Content-Type"] = ct
 
         try:
             ssl_ctx = ssl.create_default_context()
