@@ -8,11 +8,11 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 
 from .api import GeelyGalaxyApi, GeelyApiError, GeelyAuthError
+from .captcha_views import ensure_captcha_views
 from .const import (
     DOMAIN,
     CONF_REFRESH_TOKEN,
@@ -52,61 +52,6 @@ STEP_SMS_CODE_SCHEMA = vol.Schema(
         vol.Required("sms_code"): str,
     }
 )
-
-
-# ==================== 验证码回调 HTTP 视图 ====================
-
-class GeelyCaptchaCallbackView(HomeAssistantView):
-    """接收 GeeTest 验证码页面的回调结果。
-
-    验证码页面完成滑块验证后，自动 POST 结果到此端点，
-    无需用户手动复制粘贴验证码。
-    """
-
-    url = "/api/geely_galaxy/captcha_callback"
-    name = "api:geely_galaxy:captcha_callback"
-    requires_auth = False  # flow_id 本身作为一次性凭证
-
-    async def post(self, request):
-        """Handle POST with captcha result."""
-        hass = request.app["hass"]
-        try:
-            data = await request.json()
-        except Exception:
-            return self.json_message("Invalid JSON", status_code=400)
-
-        flow_id = data.get("flow_id")
-        captcha_data = data.get("captcha_data")
-
-        if not flow_id or not captcha_data:
-            return self.json_message("Missing data", status_code=400)
-
-        required_keys = ["lot_number", "captcha_output", "pass_token", "gen_time"]
-        if not all(k in captcha_data for k in required_keys):
-            return self.json_message("Invalid captcha data", status_code=400)
-
-        # 存储验证码结果，供 config flow 步骤读取
-        hass.data.setdefault(DOMAIN, {})
-        hass.data[DOMAIN].setdefault("captcha_results", {})
-        hass.data[DOMAIN]["captcha_results"][flow_id] = captcha_data
-
-        # 推进 config flow 到下一步
-        try:
-            await hass.config_entries.flow.async_configure(flow_id=flow_id)
-        except Exception as err:
-            _LOGGER.error("推进配置流程失败 %s: %s", flow_id, err)
-            return self.json_message(str(err), status_code=500)
-
-        return self.json({"success": True})
-
-
-def _ensure_captcha_view(hass: HomeAssistant) -> None:
-    """注册验证码回调视图（仅首次调用时注册）。"""
-    domain_data = hass.data.setdefault(DOMAIN, {})
-    if not domain_data.get("captcha_view_registered"):
-        domain_data["captcha_results"] = {}
-        domain_data["captcha_view_registered"] = True
-        hass.http.register_view(GeelyCaptchaCallbackView())
 
 
 # ==================== 辅助函数 ====================
@@ -215,7 +160,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         验证码页面完成后会自动回调，推进到下一步。
         """
-        _ensure_captcha_view(self.hass)
+        ensure_captcha_views(self.hass)
 
         captcha_data = self._get_captcha_data()
         if captcha_data:
@@ -224,7 +169,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_external_step(
             step_id="sms_captcha",
-            url=f"/local/geely_captcha.html?flow_id={self.flow_id}",
+            url=f"/api/geely_galaxy/captcha?flow_id={self.flow_id}",
         )
 
     async def async_step_sms_code(
@@ -353,7 +298,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """外部步骤 - GeeTest 滑块验证（密码登录流程）。"""
-        _ensure_captcha_view(self.hass)
+        ensure_captcha_views(self.hass)
 
         captcha_data = self._get_captcha_data()
         if captcha_data:
@@ -362,7 +307,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_external_step(
             step_id="captcha",
-            url=f"/local/geely_captcha.html?flow_id={self.flow_id}",
+            url=f"/api/geely_galaxy/captcha?flow_id={self.flow_id}",
         )
 
     async def async_step_pwd_login(
