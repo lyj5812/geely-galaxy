@@ -330,7 +330,7 @@ CAPTCHA_HTML = r"""<!DOCTYPE html>
         <div id="debug-log"></div>
     </div>
 
-    <script src="https://static.geetest.com/v4/gt4.js"></script>
+    <script src="/api/geely_galaxy/gt/www/gt4.js"></script>
     <script>
         var CAPTCHA_ID = "__CAPTCHA_ID__";
         var flowId = "__FLOW_ID__";
