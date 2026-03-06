@@ -169,44 +169,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 except GeelyApiError:
                     pass
 
-                # 充电记录列表（循环加载全部页，客户端分页）
-                all_records = []
-                fetch_page = 1
-                while True:
-                    await asyncio.sleep(1)
-                    try:
-                        records_result = await api.get_home_charger_records(
-                            pc, page=fetch_page, page_size=50
-                        )
-                        if isinstance(records_result, list):
-                            page_data = records_result
-                        elif isinstance(records_result, dict):
-                            page_data = (
-                                records_result.get("list")
-                                or records_result.get("records")
-                                or []
-                            )
-                        else:
-                            page_data = []
-                    except GeelyApiError:
-                        break
-                    if not page_data:
-                        break
-                    all_records.extend(page_data)
-                    if len(page_data) < 50:
-                        break  # 最后一页，不满一页说明没有更多了
-                    fetch_page += 1
-                    if fetch_page > 20:
-                        break  # 安全上限，最多 1000 条
-                _LOGGER.debug("充电桩 %s 共加载 %d 条记录", pc, len(all_records))
+                # 充电记录列表（加载当前页）
+                records = []
+                records_total = 0
+                page = charger_pages.get(pc, 1)
+                await asyncio.sleep(1)
+                try:
+                    records_result = await api.get_home_charger_records(pc, page=page, page_size=10)
+                    if isinstance(records_result, list):
+                        records = records_result
+                    elif isinstance(records_result, dict):
+                        records = records_result.get("list") or records_result.get("records") or []
+                        records_total = records_result.get("total", 0)
+                except GeelyApiError:
+                    pass
 
                 home_chargers[pc] = {
                     "info": charger_info,
                     "status": status,
                     "charging_data": charging_data,
                     "last_record": last_record,
-                    "all_records": all_records,
-                    "records_page": charger_pages.get(pc, 1),
+                    "records": records,
+                    "records_page": page,
+                    "records_total": records_total,
                 }
                 _LOGGER.debug("充电桩 %s 数据已获取", pc)
 
@@ -235,7 +220,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "home_charger_status": primary.get("status", {}),
                 "home_charger_charging_data": primary.get("charging_data", {}),
                 "home_charger_last_record": primary.get("last_record", {}),
-                "home_charger_records": primary.get("all_records", []),
+                "home_charger_records": primary.get("records", []),
             }
         except GeelyAuthError as err:
             # Token 失效（如 APP 重新登录导致），触发重新认证流程
@@ -332,21 +317,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 翻页服务：直接更新记录数据，无需完整刷新
     if not hass.services.has_service(DOMAIN, "charger_next_page"):
 
-        def _update_page(coord, piling_code, new_page):
-            """本地翻页：更新 coordinator 中的当前页码。"""
-            if not coord.data or piling_code not in coord.data.get("home_chargers", {}):
-                _LOGGER.warning("翻页失败：充电桩 %s 不在 coordinator 数据中", piling_code)
+        async def _fetch_and_update_records(coord, api_inst, piling_code, new_page):
+            """实时获取指定页记录并更新 coordinator 数据。"""
+            try:
+                result = await api_inst.get_home_charger_records(
+                    piling_code, page=new_page, page_size=10
+                )
+                if isinstance(result, list):
+                    records = result
+                    total = 0
+                elif isinstance(result, dict):
+                    records = result.get("list") or result.get("records") or []
+                    total = result.get("total", 0)
+                else:
+                    records = []
+                    total = 0
+            except GeelyApiError as err:
+                _LOGGER.warning("翻页获取记录失败 (page=%d): %s", new_page, err)
                 return False
-            charger = coord.data["home_chargers"][piling_code]
-            all_records = charger.get("all_records", [])
-            page_size = 10
-            max_page = max(1, (len(all_records) + page_size - 1) // page_size)
-            if new_page < 1 or new_page > max_page:
+
+            if not records and new_page > 1:
+                _LOGGER.debug("第 %d 页无记录，已到最后一页", new_page)
                 return False
-            charger["records_page"] = new_page
-            charger_pages[piling_code] = new_page
-            coord.async_set_updated_data(coord.data)
-            _LOGGER.debug("翻页成功：%s page=%d/%d", piling_code, new_page, max_page)
+
+            if coord.data and piling_code in coord.data.get("home_chargers", {}):
+                charger = coord.data["home_chargers"][piling_code]
+                charger["records"] = records
+                charger["records_page"] = new_page
+                if total:
+                    charger["records_total"] = total
+                coord.async_set_updated_data(coord.data)
             return True
 
         async def handle_charger_next_page(call: ServiceCall) -> None:
@@ -354,18 +354,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             piling_code = call.data["piling_code"]
             entry_data = next(iter(hass.data[DOMAIN].values()), None)
             if not entry_data:
+                _LOGGER.warning("翻页失败：集成未加载")
                 return
             new_page = charger_pages.get(piling_code, 1) + 1
-            _update_page(entry_data["coordinator"], piling_code, new_page)
+            ok = await _fetch_and_update_records(
+                entry_data["coordinator"], entry_data["api"], piling_code, new_page
+            )
+            if ok:
+                charger_pages[piling_code] = new_page
 
         async def handle_charger_prev_page(call: ServiceCall) -> None:
             """翻到上一页充电记录。"""
             piling_code = call.data["piling_code"]
             entry_data = next(iter(hass.data[DOMAIN].values()), None)
             if not entry_data:
+                _LOGGER.warning("翻页失败：集成未加载")
                 return
-            new_page = charger_pages.get(piling_code, 1) - 1
-            _update_page(entry_data["coordinator"], piling_code, new_page)
+            new_page = max(charger_pages.get(piling_code, 1) - 1, 1)
+            if new_page == charger_pages.get(piling_code, 1):
+                return
+            ok = await _fetch_and_update_records(
+                entry_data["coordinator"], entry_data["api"], piling_code, new_page
+            )
+            if ok:
+                charger_pages[piling_code] = new_page
 
         page_schema = vol.Schema({
             vol.Required("piling_code"): str,
