@@ -31,3 +31,27 @@ query_charger_records:
           min: 1
           max: 100
           mode: box
+
+charger_next_page:
+  name: 充电记录下一页
+  description: 翻到指定充电桩的下一页充电记录
+  fields:
+    piling_code:
+      name: 充电桩编码
+      description: 充电桩的 pilingsCode
+      required: true
+      example: "70100418531"
+      selector:
+        text:
+
+charger_prev_page:
+  name: 充电记录上一页
+  description: 翻到指定充电桩的上一页充电记录
+  fields:
+    piling_code:
+      name: 充电桩编码
+      description: 充电桩的 pilingsCode
+      required: true
+      example: "70100418531"
+      selector:
+        text:

@@ -1295,13 +1295,16 @@ class HomeChargerRecordsSensor(HomeChargerBaseSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes with full records list."""
         records = self.charger_data.get("records", [])
+        current_page = self.charger_data.get("records_page", 1)
+        records_total = self.charger_data.get("records_total", 0)
+
         if not records:
-            return {"records": []}
+            return {"records": [], "current_page": current_page, "total_records": records_total}
 
         # 格式化记录列表
         formatted_records = []
-        for i, record in enumerate(records[:10]):  # 最多显示10条
-            formatted_record = {"序号": i + 1}
+        for i, record in enumerate(records):
+            formatted_record = {"序号": (current_page - 1) * 10 + i + 1}
             field_map = {
                 "startTime": "开始时间",
                 "endTime": "结束时间",
@@ -1326,5 +1329,7 @@ class HomeChargerRecordsSensor(HomeChargerBaseSensor):
         return {
             "total_count": len(records),
             "total_energy_kwh": round(total_energy, 2),
+            "current_page": current_page,
+            "total_records": records_total,
             "records": formatted_records,
         }
