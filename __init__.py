@@ -169,17 +169,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 except GeelyApiError:
                     pass
 
-                # 充电记录列表（一次加载全部，客户端分页）
+                # 充电记录列表（循环加载全部页，客户端分页）
                 all_records = []
-                await asyncio.sleep(1)
-                try:
-                    records_result = await api.get_home_charger_records(pc, page=1, page_size=100)
-                    if isinstance(records_result, list):
-                        all_records = records_result
-                    elif isinstance(records_result, dict):
-                        all_records = records_result.get("list") or records_result.get("records") or []
-                except GeelyApiError:
-                    pass
+                fetch_page = 1
+                while True:
+                    await asyncio.sleep(1)
+                    try:
+                        records_result = await api.get_home_charger_records(
+                            pc, page=fetch_page, page_size=50
+                        )
+                        if isinstance(records_result, list):
+                            page_data = records_result
+                        elif isinstance(records_result, dict):
+                            page_data = (
+                                records_result.get("list")
+                                or records_result.get("records")
+                                or []
+                            )
+                        else:
+                            page_data = []
+                    except GeelyApiError:
+                        break
+                    if not page_data:
+                        break
+                    all_records.extend(page_data)
+                    if len(page_data) < 50:
+                        break  # 最后一页，不满一页说明没有更多了
+                    fetch_page += 1
+                    if fetch_page > 20:
+                        break  # 安全上限，最多 1000 条
+                _LOGGER.debug("充电桩 %s 共加载 %d 条记录", pc, len(all_records))
 
                 home_chargers[pc] = {
                     "info": charger_info,
