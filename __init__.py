@@ -15,7 +15,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import GeelyGalaxyApi, GeelyApiError
+from .api import GeelyGalaxyApi, GeelyApiError, GeelyAuthError
 from .const import (
     DOMAIN,
     CONF_REFRESH_TOKEN,
@@ -195,6 +195,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "home_charger_last_record": home_charger_last_record,
                 "home_charger_records": home_charger_records,
             }
+        except GeelyAuthError as err:
+            # Token 失效（如 APP 重新登录导致），触发重新认证流程
+            _LOGGER.error("认证失败，触发重新登录流程: %s", err)
+            entry.async_start_reauth(hass)
+            raise UpdateFailed(f"认证失败，请重新登录: {err}") from err
         except GeelyApiError as err:
             raise UpdateFailed(f"Error communicating with API: {err}") from err
 

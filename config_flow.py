@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -114,6 +115,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._login_method: str = ""
         self._captcha_data: dict | None = None
 
+    @property
+    def _is_reauth(self) -> bool:
+        """Check if this flow is a reauth flow."""
+        return self.context.get("source") == config_entries.SOURCE_REAUTH
+
+    def _finish_login(self, title: str, data: dict[str, Any]) -> FlowResult:
+        """Finish login: update existing entry (reauth) or create new entry."""
+        if self._is_reauth:
+            return self.async_update_reload_and_abort(
+                self._get_reauth_entry(), data=data,
+            )
+        return self.async_create_entry(title=title, data=data)
+
     def _get_captcha_data(self) -> dict | None:
         """读取并消费本次 flow 的验证码结果。"""
         results = self.hass.data.get(DOMAIN, {}).get("captcha_results", {})
@@ -136,7 +150,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             menu_options=[LOGIN_METHOD_SMS, LOGIN_METHOD_PASSWORD, LOGIN_METHOD_TOKEN],
         )
 
+    # ==================== 重新认证 ====================
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle reauth when token expires (e.g. APP login invalidated HA token)."""
+        return await self.async_step_user()
+
     # ==================== 短信验证码登录流程 ====================
+
+    async def async_step_sms(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Dispatch SMS menu option to sms_phone step."""
+        return await self.async_step_sms_phone(user_input)
 
     async def async_step_sms_phone(
         self, user_input: dict[str, Any] | None = None
@@ -192,7 +220,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 info = await _do_login_and_get_info(api)
 
-                if info.get("vin"):
+                if info.get("vin") and not self._is_reauth:
                     await self.async_set_unique_id(info["vin"])
                     self._abort_if_unique_id_configured()
 
@@ -200,7 +228,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_REFRESH_TOKEN: tokens["refresh_token"],
                     CONF_DEVICE_SN: self._device_sn,
                 }
-                return self.async_create_entry(
+                return self._finish_login(
                     title=info["title"], data=entry_data
                 )
             except GeelyAuthError as err:
@@ -265,10 +293,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
             else:
-                if info.get("vin"):
+                if info.get("vin") and not self._is_reauth:
                     await self.async_set_unique_id(info["vin"])
                     self._abort_if_unique_id_configured()
-                return self.async_create_entry(title=info["title"], data=user_input)
+                return self._finish_login(title=info["title"], data=user_input)
 
         return self.async_show_form(
             step_id="token",
@@ -334,7 +362,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             info = await _do_login_and_get_info(api)
 
-            if info.get("vin"):
+            if info.get("vin") and not self._is_reauth:
                 await self.async_set_unique_id(info["vin"])
                 self._abort_if_unique_id_configured()
 
@@ -342,7 +370,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_REFRESH_TOKEN: tokens["refresh_token"],
                 CONF_DEVICE_SN: self._device_sn,
             }
-            return self.async_create_entry(
+            return self._finish_login(
                 title=info["title"], data=entry_data
             )
         except GeelyAuthError as err:

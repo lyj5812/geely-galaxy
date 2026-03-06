@@ -58,7 +58,8 @@
       "unknown": "未知错误"
     },
     "abort": {
-      "already_configured": "该车辆已配置"
+      "already_configured": "该车辆已配置",
+      "reauth_successful": "重新认证成功"
     }
   }
 }

@@ -278,7 +278,7 @@ class GeelyBatteryLevelSensor(GeelyBaseSensor):
 class GeelyRangeSensor(GeelyBaseSensor):
     """Sensor for remaining range."""
 
-    _attr_name = "续航里程"
+    _attr_name = "电量续航里程"
     _attr_native_unit_of_measurement = UnitOfLength.KILOMETERS
     _attr_device_class = SensorDeviceClass.DISTANCE
     _attr_state_class = SensorStateClass.MEASUREMENT
