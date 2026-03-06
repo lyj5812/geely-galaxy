@@ -10,6 +10,8 @@ import base64
 import uuid
 import json
 import logging
+import random
+import string
 import time
 from typing import Any
 from datetime import datetime, timezone
@@ -49,6 +51,17 @@ RECHARGE_CONFIG = {
     "oauth_client_id": "30000023",
 }
 
+# XCHANGER 平台配置（用于 geely2/L7 等不支持 VC 的车型）
+XCHANGER_CONFIG = {
+    "user_host": "user-api.xchanger.cn",
+    "device_host": "device-api.xchanger.cn",
+    "app_id": "galaxy_SDK_new",
+    "operator_code": "geelygalaxy",
+    "client_id": "EPLUS0000APP00IN2020263250667542",
+    "sign_secret": "8c5d1f3a09e6b427d0c23a8f59b47e21",
+    "oauth_client_id": "30000022",
+}
+
 
 class GeelyApiError(Exception):
     """Exception for Geely API errors."""
@@ -78,6 +91,11 @@ class GeelyGalaxyApi:
         self._own_session = False
         self._vehicle_info: dict = {}
         self._piling_code: str | None = None  # 缓存充电桩编码
+        # XCHANGER 状态（geely2/L7 车型）
+        self._xchanger_jwt: str | None = None
+        self._xchanger_jwt_expire_at: float = 0
+        self._xchanger_user_id: str | None = None
+        self._use_xchanger: bool = False  # VC 返回 B00000 后自动切换
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """Ensure we have a valid session."""
@@ -475,6 +493,287 @@ class GeelyGalaxyApi:
         except aiohttp.ClientError as err:
             raise GeelyApiError(f"Connection error: {err}") from err
 
+    # ========== XCHANGER 平台方法 (geely2/L7) ==========
+
+    @staticmethod
+    def _generate_xchanger_nonce(timestamp_ms: str) -> str:
+        """生成 XCHANGER 请求的 nonce。"""
+        hex1 = "".join(random.choices("0123456789abcdef", k=3))
+        hex2 = "".join(random.choices("0123456789abcdef", k=12))
+        alpha = "".join(random.choices(
+            string.ascii_uppercase + string.digits, k=7))
+        return f"{hex1}-{hex2}{alpha}{timestamp_ms}"
+
+    @staticmethod
+    def _xchanger_sign(
+        method: str, path: str, timestamp: str, nonce: str,
+        body: str | None = None,
+    ) -> str:
+        """XCHANGER HMAC-SHA1 签名（非标准格式，method 在末尾）。"""
+        accept = "application/json;responseformat=3"
+        body_bytes = (body or "").encode()
+        content_md5 = base64.b64encode(
+            hashlib.md5(body_bytes).digest()
+        ).decode()
+
+        if "?" in path:
+            base_path, query_string = path.split("?", 1)
+            params = sorted(query_string.split("&"))
+            sorted_query = "&".join(params)
+        else:
+            base_path = path
+            sorted_query = ""
+
+        sign_headers = (
+            f"x-api-signature-nonce:{nonce}\n"
+            f"x-api-signature-version:1.0"
+        )
+        s = (
+            f"{accept}\n{sign_headers}\n\n{sorted_query}\n"
+            f"{content_md5}\n{timestamp}\n{method}\n{base_path}"
+        )
+        return base64.b64encode(
+            hmac.new(
+                XCHANGER_CONFIG["sign_secret"].encode(),
+                s.encode(),
+                hashlib.sha1,
+            ).digest()
+        ).decode()
+
+    def _build_xchanger_headers(
+        self, host: str, ts: str, nonce: str, signature: str,
+    ) -> dict[str, str]:
+        """构建 XCHANGER 请求头。"""
+        return {
+            "host": host,
+            "x-app-id": XCHANGER_CONFIG["app_id"],
+            "accept": "application/json;responseformat=3",
+            "x-agent-type": "android",
+            "x-device-type": "mobile",
+            "x-operator-code": XCHANGER_CONFIG["operator_code"],
+            "x-device-identifier": self._device_sn,
+            "x-env-type": "production",
+            "accept-encoding": "identity",
+            "x-version": "geelygalaxyNew",
+            "x-timezone": "Asia/Shanghai",
+            "accept-language": "zh_CN",
+            "x-api-signature-version": "1.0",
+            "x-api-signature-nonce": nonce,
+            "content-type": "application/json; charset=utf-8",
+            "user-agent": "okhttp/4.9.3",
+            "x-signature": signature,
+            "x-timestamp": ts,
+        }
+
+    async def _get_xchanger_oauth_code(self) -> str:
+        """用 USP token 获取 XCHANGER 的 OAuth authCode (client_id=30000022)。"""
+        await self._ensure_token()
+        session = await self._ensure_session()
+
+        path = (
+            "/api/v1/oauth2/code?scope=snsapiMobile,snsapiUserinfo"
+            "&response_type=code&isDestruction=false&state=1&client_id="
+            + XCHANGER_CONFIG["oauth_client_id"]
+        )
+        url = f"https://{API_HOSTS['user']}{path}"
+        headers = self._build_get_headers(APP_KEYS["user"], path)
+
+        async with session.get(url, headers=headers) as response:
+            text = await response.text()
+            if response.status != 200:
+                raise GeelyApiError(
+                    f"XCHANGER OAuth code request failed: HTTP {response.status}"
+                )
+            data = json.loads(text)
+            if data.get("code") not in (0, "0", "success"):
+                raise GeelyApiError(f"XCHANGER OAuth code failed: {text[:300]}")
+
+            code = data.get("data", {}).get("code")
+            if not code:
+                raise GeelyApiError("No authCode in XCHANGER OAuth response")
+            return code
+
+    async def _get_xchanger_jwt(self) -> None:
+        """获取 XCHANGER JWT: OAuth code → session → accessToken。"""
+        auth_code = await self._get_xchanger_oauth_code()
+
+        session = await self._ensure_session()
+        path = "/auth/account/session/secure?identity_type=geelygalaxy"
+        ts = str(int(time.time() * 1000))
+        nonce = self._generate_xchanger_nonce(ts)
+        body_str = json.dumps({"authCode": auth_code}, separators=(",", ":"))
+        signature = self._xchanger_sign("POST", path, ts, nonce, body=body_str)
+        headers = self._build_xchanger_headers(
+            XCHANGER_CONFIG["user_host"], ts, nonce, signature,
+        )
+        url = f"https://{XCHANGER_CONFIG['user_host']}{path}"
+
+        async with session.post(url, data=body_str, headers=headers) as response:
+            text = await response.text()
+            if response.status != 200:
+                raise GeelyApiError(
+                    f"XCHANGER session failed: HTTP {response.status}"
+                )
+            data = json.loads(text)
+            if str(data.get("code")) != "1000":
+                raise GeelyApiError(
+                    f"XCHANGER session error: {text[:300]}"
+                )
+
+            xd = data.get("data", {})
+            jwt = xd.get("accessToken")
+            if not jwt:
+                raise GeelyApiError("No accessToken in XCHANGER response")
+
+            self._xchanger_jwt = jwt
+            self._xchanger_user_id = str(xd.get("userId", ""))
+
+            # 解析 JWT 过期时间
+            try:
+                payload_b64 = jwt.split(".")[1]
+                padding = 4 - len(payload_b64) % 4
+                if padding != 4:
+                    payload_b64 += "=" * padding
+                payload = json.loads(base64.b64decode(payload_b64))
+                self._xchanger_jwt_expire_at = payload.get("exp", 0)
+            except Exception:
+                self._xchanger_jwt_expire_at = time.time() + 90 * 86400
+
+            _LOGGER.info(
+                "XCHANGER JWT 获取成功 (user_id=%s, 过期: %s)",
+                self._xchanger_user_id,
+                datetime.fromtimestamp(self._xchanger_jwt_expire_at).isoformat(),
+            )
+
+    async def _ensure_xchanger_token(self) -> None:
+        """确保有有效的 XCHANGER JWT，过期前 1 天自动刷新。"""
+        if (
+            not self._xchanger_jwt
+            or time.time() >= (self._xchanger_jwt_expire_at - 86400)
+        ):
+            await self._get_xchanger_jwt()
+
+    async def _call_xchanger_vehicle_status(self, vin: str) -> dict[str, Any]:
+        """调用 XCHANGER 车辆状态接口。"""
+        await self._ensure_xchanger_token()
+        session = await self._ensure_session()
+
+        user_id = self._xchanger_user_id or ""
+        path = (
+            f"/remote-control/vehicle/status/{vin}"
+            f"?userId={user_id}&latest=&target="
+        )
+        ts = str(int(time.time() * 1000))
+        nonce = self._generate_xchanger_nonce(ts)
+        signature = self._xchanger_sign("GET", path, ts, nonce)
+        headers = self._build_xchanger_headers(
+            XCHANGER_CONFIG["device_host"], ts, nonce, signature,
+        )
+        headers.update({
+            "authorization": self._xchanger_jwt,
+            "x-client-id": XCHANGER_CONFIG["client_id"],
+            "x-vehicle-identifier": vin,
+        })
+        url = f"https://{XCHANGER_CONFIG['device_host']}{path}"
+
+        async with session.get(url, headers=headers) as response:
+            text = await response.text()
+            if response.status != 200:
+                raise GeelyApiError(
+                    f"XCHANGER status failed: HTTP {response.status}"
+                )
+
+            data = json.loads(text)
+            code = str(data.get("code", ""))
+
+            if code == "1402":
+                raise GeelyAuthError("XCHANGER JWT 已失效 (1402)")
+
+            if code != "1000":
+                raise GeelyApiError(
+                    f"XCHANGER status error (code={code}): "
+                    f"{data.get('message', '')}"
+                )
+
+            return data.get("data", {})
+
+    @staticmethod
+    def _transform_xchanger_to_vc_format(
+        xchanger_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """将 XCHANGER 车辆状态转换为 VC API 兼容格式，使现有传感器无需修改。"""
+        vs = xchanger_data.get("vehicleStatus", {})
+        basic = vs.get("basicVehicleStatus", {})
+        additional = vs.get("additionalVehicleStatus", {})
+        ev = additional.get("electricVehicleStatus", {})
+        climate = additional.get("climateStatus", {})
+        maintenance = additional.get("maintenanceStatus", {})
+        running = additional.get("runningStatus", {})
+        safety = additional.get("drivingSafetyStatus", {})
+        pollution = additional.get("pollutionStatus", {})
+
+        return {
+            "basicVehicleStatus": {
+                "distanceToEmptyOnBatteryOnly": ev.get(
+                    "distanceToEmptyOnBatteryOnly"
+                ),
+                "odometer": maintenance.get("odometer"),
+                "distanceToEmpty": basic.get("distanceToEmpty"),
+                "position": basic.get("position"),
+                "engineStatus": basic.get("engineStatus"),
+            },
+            "vehicleBatteryStatus": {
+                "chargeLevel": ev.get("chargeLevel"),
+                "timeToFullyCharged": ev.get("timeToFullyCharged"),
+            },
+            "vehicleEnvironmentStatus": {
+                "interiorTemp": climate.get("interiorTemp"),
+                "exteriorTemp": climate.get("exteriorTemp"),
+                "interiorPM25Level": pollution.get("interiorPM25Level"),
+            },
+            "vehicleRunningStatus": {
+                "averPowerConsumption": ev.get("averPowerConsumption"),
+            },
+            "vehicleDoorCoverStatus": {
+                "doorLockStatusDriver": safety.get("doorLockStatusDriver"),
+            },
+            "vehicleClimateStatus": {
+                "preClimateActive": climate.get("preClimateActive"),
+            },
+            # XCHANGER 独有数据（L7 PHEV 特有）
+            "_xchanger_extra": {
+                "updateTime": vs.get("updateTime"),
+                "fuelLevel": running.get("fuelLevel"),
+                "fuelLevelPct": running.get("fuelLevelPct"),
+                "chargeSts": ev.get("chargeSts"),
+                "centralLockingStatus": safety.get("centralLockingStatus"),
+                "tyreStatusDriver": maintenance.get("tyreStatusDriver"),
+                "tyreStatusPassenger": maintenance.get("tyreStatusPassenger"),
+                "tyreStatusDriverRear": maintenance.get(
+                    "tyreStatusDriverRear"
+                ),
+                "tyreStatusPassengerRear": maintenance.get(
+                    "tyreStatusPassengerRear"
+                ),
+                "winStatusDriver": climate.get("winStatusDriver"),
+                "winStatusPassenger": climate.get("winStatusPassenger"),
+            },
+        }
+
+    async def _get_xchanger_vehicle_status(
+        self, vin: str,
+    ) -> dict[str, Any]:
+        """通过 XCHANGER 获取车辆状态（geely2/L7 等不支持 VC 的车型）。"""
+        try:
+            raw = await self._call_xchanger_vehicle_status(vin)
+            return self._transform_xchanger_to_vc_format(raw)
+        except GeelyAuthError:
+            # JWT 失效（可能 APP 端获取了新 JWT），重新认证
+            _LOGGER.info("XCHANGER JWT 失效，重新获取...")
+            self._xchanger_jwt = None
+            raw = await self._call_xchanger_vehicle_status(vin)
+            return self._transform_xchanger_to_vc_format(raw)
+
     async def _ensure_vin(self, vin: str | None) -> str:
         """确保有可用的 VIN。"""
         await self._ensure_token()
@@ -525,26 +824,38 @@ class GeelyGalaxyApi:
             return data.get("data") or {}
 
     async def get_vehicle_status(self, vin: str | None = None) -> dict[str, Any]:
-        """Get vehicle status with retry on failure.
+        """Get vehicle status, auto-fallback to XCHANGER for geely2/L7.
 
-        对于 geely2 车型（如 L7），服务端可能返回 B00000 错误（请求被拒绝），
-        此时返回空字典而不是抛出异常，以便其他功能（开关状态、远程控制）继续正常工作。
+        对于 geely2 车型（如 L7），VC API 返回 B00000 错误，
+        自动切换到 XCHANGER 平台查询，并缓存此决策避免后续重复尝试 VC。
         """
         import asyncio
 
         vin = await self._ensure_vin(vin)
 
+        # 已知需要使用 XCHANGER 的车型，直接走 XCHANGER
+        if self._use_xchanger:
+            try:
+                return await self._get_xchanger_vehicle_status(vin)
+            except GeelyApiError as err:
+                _LOGGER.warning("XCHANGER 车辆状态查询失败: %s", err)
+                return {}
+
         try:
             return await self._call_vehicle_status(vin)
         except GeelyApiError as err:
             err_msg = str(err)
-            # B00000 表示请求被服务端拒绝（常见于 geely2 车型）
+            # B00000 表示 VC 不支持此车型，切换到 XCHANGER
             if "B00000" in err_msg:
-                _LOGGER.warning(
-                    "车辆状态查询被服务端拒绝 (B00000)，可能是 geely2 车型限制。"
-                    "开关状态和远程控制不受影响。"
+                _LOGGER.info(
+                    "VC API 返回 B00000 (geely2/L7)，切换到 XCHANGER 平台"
                 )
-                return {}
+                self._use_xchanger = True
+                try:
+                    return await self._get_xchanger_vehicle_status(vin)
+                except GeelyApiError as xc_err:
+                    _LOGGER.warning("XCHANGER 回退也失败: %s", xc_err)
+                    return {}
 
             # 其他错误：尝试刷新 token 后重试一次
             _LOGGER.info("车辆状态首次请求失败，刷新 token 后重试...")
@@ -554,8 +865,15 @@ class GeelyGalaxyApi:
                 return await self._call_vehicle_status(vin)
             except GeelyApiError as retry_err:
                 if "B00000" in str(retry_err):
-                    _LOGGER.warning("车辆状态查询被服务端拒绝 (B00000)")
-                    return {}
+                    _LOGGER.info(
+                        "重试后仍 B00000，切换到 XCHANGER 平台"
+                    )
+                    self._use_xchanger = True
+                    try:
+                        return await self._get_xchanger_vehicle_status(vin)
+                    except GeelyApiError as xc_err:
+                        _LOGGER.warning("XCHANGER 回退也失败: %s", xc_err)
+                        return {}
                 raise
             except aiohttp.ClientError as err:
                 raise GeelyApiError(f"Connection error: {err}") from err
