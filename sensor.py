@@ -86,9 +86,18 @@ async def async_setup_entry(
             GeelyTirePressureSensor(coordinator, entry, "passenger_rear", "右后"),
         ])
 
-    # 如果有家用充电桩，添加充电记录传感器
-    if coordinator.data and coordinator.data.get("home_charger_list"):
-        entities.append(HomeChargerRecordsSensor(coordinator, entry))
+    # 为每个家用充电桩创建独立设备和传感器
+    home_chargers = coordinator.data.get("home_chargers", {}) if coordinator.data else {}
+    for piling_code, charger_data in home_chargers.items():
+        charger_name = charger_data.get("info", {}).get("name", "充电桩")
+        entities.extend([
+            HomeChargerStatusSensor(coordinator, entry, piling_code, charger_name),
+            HomeChargerPowerSensor(coordinator, entry, piling_code, charger_name),
+            HomeChargerVoltageSensor(coordinator, entry, piling_code, charger_name),
+            HomeChargerCurrentSensor(coordinator, entry, piling_code, charger_name),
+            HomeChargerLastRecordSensor(coordinator, entry, piling_code, charger_name),
+            HomeChargerRecordsSensor(coordinator, entry, piling_code, charger_name),
+        ])
 
     async_add_entities(entities)
 
@@ -1005,50 +1014,294 @@ class GeelyTirePressureSensor(GeelyBaseSensor):
         return None
 
 
-class HomeChargerRecordsSensor(GeelyBaseSensor):
-    """Sensor for home charger records."""
+class HomeChargerBaseSensor(GeelyBaseSensor):
+    """Base class for per-charger sensors."""
 
-    _attr_name = "充电桩充电记录"
-    _attr_icon = "mdi:clipboard-list"
-
-    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        coordinator: DataUpdateCoordinator,
+        entry: ConfigEntry,
+        piling_code: str,
+        charger_name: str,
+    ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_charger_records"
+        self._piling_code = piling_code
+        self._charger_name = charger_name
 
     @property
     def device_info(self) -> dict[str, Any]:
-        """Return device info for the home charger."""
-        charger_status = self.home_charger_status
-        piling_code = charger_status.get("pilingsCode", "unknown")
-        charger_name = charger_status.get("pilingsName", "家用充电桩")
-
+        """Return device info for this charger."""
         return {
-            "identifiers": {(DOMAIN, f"charger_{piling_code}")},
-            "name": charger_name,
+            "identifiers": {(DOMAIN, f"charger_{self._piling_code}")},
+            "name": self._charger_name,
             "manufacturer": "吉利汽车",
             "model": "家用充电桩",
         }
 
     @property
+    def charger_data(self) -> dict[str, Any]:
+        """Get this charger's data from coordinator."""
+        if not self.coordinator.data:
+            return {}
+        return self.coordinator.data.get("home_chargers", {}).get(self._piling_code, {})
+
+
+class HomeChargerStatusSensor(HomeChargerBaseSensor):
+    """Sensor for home charger status."""
+
+    _attr_icon = "mdi:ev-station"
+
+    def __init__(
+        self, coordinator: DataUpdateCoordinator, entry: ConfigEntry,
+        piling_code: str, charger_name: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry, piling_code, charger_name)
+        self._attr_name = "状态"
+        self._attr_unique_id = f"{entry.entry_id}_charger_{piling_code}_status"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the charger status."""
+        status = self.charger_data.get("status", {})
+        is_online = status.get("isOnline")
+        if is_online == 0:
+            return "离线"
+        equip_status = status.get("status")
+        status_map = {
+            0: "空闲", "0": "空闲",
+            1: "已插枪", "1": "已插枪",
+            2: "充电中", "2": "充电中",
+            4: "充电完成", "4": "充电完成",
+        }
+        return status_map.get(equip_status, f"状态({equip_status})")
+
+    @property
+    def icon(self) -> str:
+        """Return icon based on status."""
+        val = self.native_value
+        if val == "离线":
+            return "mdi:ev-station-off"
+        if val == "充电中":
+            return "mdi:battery-charging"
+        return "mdi:ev-station"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra attributes."""
+        status = self.charger_data.get("status", {})
+        info = self.charger_data.get("info", {})
+        attrs = {}
+        for key in [
+            "pilingsCode", "isOnline", "isOwner", "bleName", "bleMac",
+            "hardwareVersion", "softwareVersion", "quickCharge",
+        ]:
+            val = status.get(key)
+            if val is None:
+                val = info.get(key)
+            if val is not None:
+                attrs[key] = val
+        return attrs
+
+
+class HomeChargerPowerSensor(HomeChargerBaseSensor):
+    """Sensor for home charger real-time charging power."""
+
+    _attr_native_unit_of_measurement = UnitOfPower.KILO_WATT
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:flash"
+
+    def __init__(
+        self, coordinator: DataUpdateCoordinator, entry: ConfigEntry,
+        piling_code: str, charger_name: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry, piling_code, charger_name)
+        self._attr_name = "充电功率"
+        self._attr_unique_id = f"{entry.entry_id}_charger_{piling_code}_power"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the charging power."""
+        charging_data = self.charger_data.get("charging_data", {})
+        if charging_data:
+            power = charging_data.get("power") or charging_data.get("chargingPower") or charging_data.get("realPower")
+            if power is not None:
+                try:
+                    return round(float(power), 2)
+                except (ValueError, TypeError):
+                    pass
+        # 尝试从状态中获取
+        status = self.charger_data.get("status", {})
+        power = status.get("power") or status.get("chargingPower")
+        if power is not None:
+            try:
+                return round(float(power), 2)
+            except (ValueError, TypeError):
+                pass
+        return None
+
+
+class HomeChargerVoltageSensor(HomeChargerBaseSensor):
+    """Sensor for home charger real-time charging voltage."""
+
+    _attr_native_unit_of_measurement = "V"
+    _attr_device_class = SensorDeviceClass.VOLTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:lightning-bolt"
+
+    def __init__(
+        self, coordinator: DataUpdateCoordinator, entry: ConfigEntry,
+        piling_code: str, charger_name: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry, piling_code, charger_name)
+        self._attr_name = "充电电压"
+        self._attr_unique_id = f"{entry.entry_id}_charger_{piling_code}_voltage"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the charging voltage."""
+        charging_data = self.charger_data.get("charging_data", {})
+        if charging_data:
+            voltage = charging_data.get("voltage") or charging_data.get("chargingVoltage") or charging_data.get("realVoltage")
+            if voltage is not None:
+                try:
+                    return round(float(voltage), 1)
+                except (ValueError, TypeError):
+                    pass
+        status = self.charger_data.get("status", {})
+        voltage = status.get("voltage") or status.get("chargingVoltage")
+        if voltage is not None:
+            try:
+                return round(float(voltage), 1)
+            except (ValueError, TypeError):
+                pass
+        return None
+
+
+class HomeChargerCurrentSensor(HomeChargerBaseSensor):
+    """Sensor for home charger real-time charging current."""
+
+    _attr_native_unit_of_measurement = "A"
+    _attr_device_class = SensorDeviceClass.CURRENT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:current-ac"
+
+    def __init__(
+        self, coordinator: DataUpdateCoordinator, entry: ConfigEntry,
+        piling_code: str, charger_name: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry, piling_code, charger_name)
+        self._attr_name = "充电电流"
+        self._attr_unique_id = f"{entry.entry_id}_charger_{piling_code}_current"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the charging current."""
+        charging_data = self.charger_data.get("charging_data", {})
+        if charging_data:
+            current = charging_data.get("current") or charging_data.get("chargingCurrent") or charging_data.get("realCurrent") or charging_data.get("currentA")
+            if current is not None:
+                try:
+                    return round(float(current), 1)
+                except (ValueError, TypeError):
+                    pass
+        status = self.charger_data.get("status", {})
+        current = status.get("current") or status.get("chargingCurrent") or status.get("currentA")
+        if current is not None:
+            try:
+                return round(float(current), 1)
+            except (ValueError, TypeError):
+                pass
+        return None
+
+
+class HomeChargerLastRecordSensor(HomeChargerBaseSensor):
+    """Sensor for home charger last charge record."""
+
+    _attr_native_unit_of_measurement = "kWh"
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_icon = "mdi:battery-charging-100"
+
+    def __init__(
+        self, coordinator: DataUpdateCoordinator, entry: ConfigEntry,
+        piling_code: str, charger_name: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry, piling_code, charger_name)
+        self._attr_name = "最近充电"
+        self._attr_unique_id = f"{entry.entry_id}_charger_{piling_code}_last_record"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the energy of the last charge record."""
+        last_record = self.charger_data.get("last_record", {})
+        if not last_record:
+            return None
+        energy = last_record.get("degree") or last_record.get("totalDegree")
+        if energy is not None:
+            try:
+                return round(float(energy), 2)
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra attributes with charge details."""
+        last_record = self.charger_data.get("last_record", {})
+        if not last_record:
+            return {}
+        attrs = {}
+        field_map = {
+            "startTime": "开始时间",
+            "endTime": "结束时间",
+            "degree": "充电电量(kWh)",
+            "duration": "充电时长(分钟)",
+            "chargeTypeDesc": "充电类型",
+            "chargerName": "充电者",
+        }
+        for key, label in field_map.items():
+            if key in last_record and last_record[key] is not None:
+                attrs[label] = last_record[key]
+        return attrs
+
+
+class HomeChargerRecordsSensor(HomeChargerBaseSensor):
+    """Sensor for home charger records."""
+
+    _attr_icon = "mdi:clipboard-list"
+
+    def __init__(
+        self, coordinator: DataUpdateCoordinator, entry: ConfigEntry,
+        piling_code: str, charger_name: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry, piling_code, charger_name)
+        self._attr_name = "充电记录"
+        self._attr_unique_id = f"{entry.entry_id}_charger_{piling_code}_records"
+
+    @property
     def native_value(self) -> int:
         """Return the number of charge records."""
-        return len(self.home_charger_records)
+        return len(self.charger_data.get("records", []))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes with full records list."""
-        records = self.home_charger_records
+        records = self.charger_data.get("records", [])
         if not records:
             return {"records": []}
 
         # 格式化记录列表
         formatted_records = []
         for i, record in enumerate(records[:10]):  # 最多显示10条
-            formatted_record = {
-                "序号": i + 1,
-            }
-            # API 返回的字段映射
+            formatted_record = {"序号": i + 1}
             field_map = {
                 "startTime": "开始时间",
                 "endTime": "结束时间",
@@ -1059,14 +1312,11 @@ class HomeChargerRecordsSensor(GeelyBaseSensor):
             for key, label in field_map.items():
                 if key in record and record[key] is not None:
                     formatted_record[label] = record[key]
-
             formatted_records.append(formatted_record)
 
         # 统计信息
         total_energy = 0
-        total_count = len(records)
         for record in records:
-            # API 返回的充电度数字段是 degree
             energy = record.get("degree") or 0
             try:
                 total_energy += float(energy)
@@ -1074,7 +1324,7 @@ class HomeChargerRecordsSensor(GeelyBaseSensor):
                 pass
 
         return {
-            "total_count": total_count,
+            "total_count": len(records),
             "total_energy_kwh": round(total_energy, 2),
             "records": formatted_records,
         }
