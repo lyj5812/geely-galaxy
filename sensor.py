@@ -16,6 +16,7 @@ from homeassistant.const import (
     UnitOfTemperature,
     UnitOfEnergy,
     UnitOfPower,
+    UnitOfPressure,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -64,6 +65,18 @@ async def async_setup_entry(
         GeelyChargeReservationSensor(coordinator, entry),
         GeelyLastChargeEnergySensor(coordinator, entry),
     ]
+
+    # 如果是 XCHANGER 车型（L7 等 PHEV），添加专用传感器
+    vehicle_status = coordinator.data.get("vehicle_status", {}) if coordinator.data else {}
+    if vehicle_status.get("_xchanger_extra"):
+        entities.extend([
+            GeelyCombinedRangeSensor(coordinator, entry),
+            GeelyFuelLevelSensor(coordinator, entry),
+            GeelyTirePressureSensor(coordinator, entry, "driver", "左前"),
+            GeelyTirePressureSensor(coordinator, entry, "passenger", "右前"),
+            GeelyTirePressureSensor(coordinator, entry, "driver_rear", "左后"),
+            GeelyTirePressureSensor(coordinator, entry, "passenger_rear", "右后"),
+        ])
 
     # 如果有家用充电桩，添加充电记录传感器
     if coordinator.data and coordinator.data.get("home_charger_list"):
@@ -449,7 +462,8 @@ class GeelyDoorLockSensor(GeelyBaseSensor):
         """Return the door lock status."""
         door_status = self.vehicle_status.get("vehicleDoorCoverStatus", {})
         lock_status = door_status.get("doorLockStatusDriver")
-        if lock_status == "2":
+        # VC: "2"=已锁, "1"=已解锁; XCHANGER: "0"=已锁, "1"=已解锁
+        if lock_status in ("2", "0"):
             return "已锁定"
         elif lock_status == "1":
             return "已解锁"
@@ -531,11 +545,8 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
         """Return the charging status."""
         # 优先从家用充电桩状态获取
         charger_status = self.home_charger_status
-        _LOGGER.warning("[诊断] 充电状态传感器读取 home_charger_status: %s", charger_status)
         if charger_status:
-            # 充电桩状态字段是 status（0=空闲，1=充电中，等）
             status = charger_status.get("status")
-            _LOGGER.warning("[诊断] 充电桩 status 字段值: %s (类型: %s)", status, type(status).__name__ if status is not None else "None")
             if status is not None:
                 status_map = {
                     0: "空闲",
@@ -547,12 +558,9 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
                     "2": "充电中",
                     "4": "充电完成",
                 }
-                result = status_map.get(status, f"状态({status})")
-                _LOGGER.warning("[诊断] 充电状态传感器返回: %s", result)
-                return result
+                return status_map.get(status, f"状态({status})")
 
         # 回退到 last_soc 数据
-        _LOGGER.warning("[诊断] charger_status 为空或无 status，尝试 last_soc")
         soc_data = self.last_soc
         charging_status = soc_data.get("chargingStatus") or soc_data.get("chargeStatus")
         if charging_status is not None:
@@ -567,7 +575,16 @@ class GeelyChargingStatusSensor(GeelyBaseSensor):
                 "3": "充电暂停",
             }
             return status_map.get(charging_status, f"未知({charging_status})")
-        _LOGGER.warning("[诊断] 充电状态传感器返回 None（无数据）")
+
+        # 回退到 XCHANGER 车辆状态 (L7 等)
+        extra = self.vehicle_status.get("_xchanger_extra", {})
+        charge_sts = extra.get("chargeSts")
+        if charge_sts is not None:
+            xc_map = {
+                "0": "未充电", "1": "充电中", "2": "充电完成", "3": "未连接",
+            }
+            return xc_map.get(str(charge_sts), f"未知({charge_sts})")
+
         return None
 
     @property
@@ -862,6 +879,103 @@ class GeelyLastChargeEnergySensor(GeelyBaseSensor):
             if key in latest and latest[key]:
                 attrs[key] = latest[key]
         return attrs
+
+
+class GeelyCombinedRangeSensor(GeelyBaseSensor):
+    """Sensor for combined range (PHEV electric + fuel)."""
+
+    _attr_name = "综合续航"
+    _attr_native_unit_of_measurement = UnitOfLength.KILOMETERS
+    _attr_device_class = SensorDeviceClass.DISTANCE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:map-marker-distance"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_combined_range"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the combined range (electric + fuel)."""
+        basic_status = self.vehicle_status.get("basicVehicleStatus", {})
+        range_value = basic_status.get("distanceToEmpty")
+        if range_value is not None:
+            return int(range_value)
+        return None
+
+
+class GeelyFuelLevelSensor(GeelyBaseSensor):
+    """Sensor for fuel level (PHEV)."""
+
+    _attr_name = "油量"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:gas-station"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_fuel_level"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the fuel level percentage."""
+        extra = self.vehicle_status.get("_xchanger_extra", {})
+        pct = extra.get("fuelLevelPct")
+        if pct is not None:
+            return int(pct)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra attributes including fuel liters."""
+        extra = self.vehicle_status.get("_xchanger_extra", {})
+        attrs = {}
+        fuel = extra.get("fuelLevel")
+        if fuel is not None:
+            attrs["fuel_liters"] = float(fuel)
+        return attrs
+
+
+class GeelyTirePressureSensor(GeelyBaseSensor):
+    """Sensor for tire pressure."""
+
+    _attr_native_unit_of_measurement = UnitOfPressure.KPA
+    _attr_device_class = SensorDeviceClass.PRESSURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:tire"
+
+    _POSITION_KEY_MAP = {
+        "driver": "tyreStatusDriver",
+        "passenger": "tyreStatusPassenger",
+        "driver_rear": "tyreStatusDriverRear",
+        "passenger_rear": "tyreStatusPassengerRear",
+    }
+
+    def __init__(
+        self,
+        coordinator: DataUpdateCoordinator,
+        entry: ConfigEntry,
+        position: str,
+        label: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._position = position
+        self._attr_name = f"胎压({label})"
+        self._attr_unique_id = f"{entry.entry_id}_tire_pressure_{position}"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the tire pressure in kPa."""
+        extra = self.vehicle_status.get("_xchanger_extra", {})
+        key = self._POSITION_KEY_MAP.get(self._position)
+        if key:
+            value = extra.get(key)
+            if value is not None:
+                return round(float(value), 1)
+        return None
 
 
 class HomeChargerRecordsSensor(GeelyBaseSensor):
