@@ -38,6 +38,10 @@ async def async_setup_entry(
     """Set up Geely Galaxy sensors based on a config entry."""
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
+    # 判断是否为 XCHANGER 车型（L7 等 PHEV）
+    vehicle_status = coordinator.data.get("vehicle_status", {}) if coordinator.data else {}
+    is_xchanger = bool(vehicle_status.get("_xchanger_extra"))
+
     entities: list[GeelyBaseSensor] = [
         # 基础信息
         GeelyVehicleModelSensor(coordinator, entry),
@@ -55,20 +59,24 @@ async def async_setup_entry(
         # 状态
         GeelyDoorLockSensor(coordinator, entry),
         GeelyAcStatusSensor(coordinator, entry),
-        GeelySentryModeSensor(coordinator, entry),
         # 充电相关
         GeelyChargingStatusSensor(coordinator, entry),
         GeelyChargingPowerSensor(coordinator, entry),
         GeelyChargingVoltageSensor(coordinator, entry),
         GeelyChargingCurrentSensor(coordinator, entry),
         GeelyLastChargeSocSensor(coordinator, entry),
-        GeelyChargeReservationSensor(coordinator, entry),
         GeelyLastChargeEnergySensor(coordinator, entry),
     ]
 
-    # 如果是 XCHANGER 车型（L7 等 PHEV），添加专用传感器
-    vehicle_status = coordinator.data.get("vehicle_status", {}) if coordinator.data else {}
-    if vehicle_status.get("_xchanger_extra"):
+    # VC 独有传感器（XCHANGER 车型不注册）
+    if not is_xchanger:
+        entities.extend([
+            GeelySentryModeSensor(coordinator, entry),
+            GeelyChargeReservationSensor(coordinator, entry),
+        ])
+
+    # XCHANGER 车型专用传感器（L7 等 PHEV）
+    if is_xchanger:
         entities.extend([
             GeelyCombinedRangeSensor(coordinator, entry),
             GeelyFuelLevelSensor(coordinator, entry),
@@ -654,6 +662,13 @@ class GeelyChargingPowerSensor(GeelyBaseSensor):
         power = soc_data.get("chargingPower") or soc_data.get("power")
         if power is not None:
             return round(float(power), 2)
+
+        # 回退到 XCHANGER 车辆状态 (L7 等)，用 电压×电流 计算功率
+        extra = self.vehicle_status.get("_xchanger_extra", {})
+        xc_voltage = extra.get("chargeUAct")
+        xc_current = extra.get("chargeIAct")
+        if xc_voltage is not None and xc_current is not None:
+            return round(float(xc_voltage) * float(xc_current) / 1000, 2)
         return None
 
 
@@ -693,6 +708,12 @@ class GeelyChargingVoltageSensor(GeelyBaseSensor):
         voltage = soc_data.get("voltage") or soc_data.get("chargingVoltage")
         if voltage is not None:
             return round(float(voltage), 1)
+
+        # 回退到 XCHANGER 车辆状态 (L7 等)
+        extra = self.vehicle_status.get("_xchanger_extra", {})
+        xc_voltage = extra.get("chargeUAct")
+        if xc_voltage is not None:
+            return round(float(xc_voltage), 1)
         return None
 
 
@@ -732,6 +753,12 @@ class GeelyChargingCurrentSensor(GeelyBaseSensor):
         current = soc_data.get("current") or soc_data.get("chargingCurrent")
         if current is not None:
             return round(float(current), 1)
+
+        # 回退到 XCHANGER 车辆状态 (L7 等)
+        extra = self.vehicle_status.get("_xchanger_extra", {})
+        xc_current = extra.get("chargeIAct")
+        if xc_current is not None:
+            return round(float(xc_current), 1)
         return None
 
 

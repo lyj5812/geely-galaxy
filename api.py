@@ -746,6 +746,8 @@ class GeelyGalaxyApi:
                 "fuelLevel": running.get("fuelLevel"),
                 "fuelLevelPct": running.get("fuelLevelPct"),
                 "chargeSts": ev.get("chargeSts"),
+                "chargeIAct": ev.get("chargeIAct"),
+                "chargeUAct": ev.get("chargeUAct"),
                 "centralLockingStatus": safety.get("centralLockingStatus"),
                 "tyreStatusDriver": maintenance.get("tyreStatusDriver"),
                 "tyreStatusPassenger": maintenance.get("tyreStatusPassenger"),
