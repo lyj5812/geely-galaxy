@@ -1288,23 +1288,37 @@ class HomeChargerRecordsSensor(HomeChargerBaseSensor):
 
     @property
     def native_value(self) -> int:
-        """Return the number of charge records."""
-        return len(self.charger_data.get("records", []))
+        """Return the number of charge records on current page."""
+        all_records = self.charger_data.get("all_records", [])
+        page = self.charger_data.get("records_page", 1)
+        page_size = 10
+        start = (page - 1) * page_size
+        return len(all_records[start:start + page_size])
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra state attributes with full records list."""
-        records = self.charger_data.get("records", [])
+        """Return extra state attributes with paginated records."""
+        all_records = self.charger_data.get("all_records", [])
         current_page = self.charger_data.get("records_page", 1)
-        records_total = self.charger_data.get("records_total", 0)
+        page_size = 10
+        total_all = len(all_records)
+        total_pages = max(1, (total_all + page_size - 1) // page_size)
 
-        if not records:
-            return {"records": [], "current_page": current_page, "total_records": records_total}
+        # 当前页切片
+        start = (current_page - 1) * page_size
+        page_records = all_records[start:start + page_size]
+
+        if not page_records:
+            return {
+                "records": [], "current_page": current_page,
+                "total_records": total_all, "total_pages": total_pages,
+                "total_count": 0,
+            }
 
         # 格式化记录列表
         formatted_records = []
-        for i, record in enumerate(records):
-            formatted_record = {"序号": (current_page - 1) * 10 + i + 1}
+        for i, record in enumerate(page_records):
+            formatted_record = {"序号": start + i + 1}
             field_map = {
                 "startTime": "开始时间",
                 "endTime": "结束时间",
@@ -1317,9 +1331,9 @@ class HomeChargerRecordsSensor(HomeChargerBaseSensor):
                     formatted_record[label] = record[key]
             formatted_records.append(formatted_record)
 
-        # 统计信息
+        # 当前页统计
         total_energy = 0
-        for record in records:
+        for record in page_records:
             energy = record.get("degree") or 0
             try:
                 total_energy += float(energy)
@@ -1327,9 +1341,10 @@ class HomeChargerRecordsSensor(HomeChargerBaseSensor):
                 pass
 
         return {
-            "total_count": len(records),
+            "total_count": len(page_records),
             "total_energy_kwh": round(total_energy, 2),
             "current_page": current_page,
-            "total_records": records_total,
+            "total_records": total_all,
+            "total_pages": total_pages,
             "records": formatted_records,
         }
