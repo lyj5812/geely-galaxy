@@ -79,6 +79,7 @@ async def async_setup_entry(
     if is_xchanger:
         entities.extend([
             GeelyCombinedRangeSensor(coordinator, entry),
+            GeelyFuelRangeSensor(coordinator, entry),
             GeelyFuelLevelSensor(coordinator, entry),
             GeelyTirePressureSensor(coordinator, entry, "driver", "左前"),
             GeelyTirePressureSensor(coordinator, entry, "passenger", "右前"),
@@ -479,11 +480,12 @@ class GeelyDoorLockSensor(GeelyBaseSensor):
         """Return the door lock status."""
         door_status = self.vehicle_status.get("vehicleDoorCoverStatus", {})
         lock_status = door_status.get("doorLockStatusDriver")
-        # VC: "2"=已锁, "1"=已解锁; XCHANGER: "0"=已锁, "1"=已解锁
+        is_xchanger = bool(self.vehicle_status.get("_xchanger_extra"))
+        # VC: "2"=已锁, "1"=已解锁; XCHANGER: "0"=已锁, "1"=已驻车
         if lock_status in ("2", "0"):
             return "已锁定"
         elif lock_status == "1":
-            return "已解锁"
+            return "已驻车" if is_xchanger else "已解锁"
         return None
 
     @property
@@ -934,6 +936,31 @@ class GeelyCombinedRangeSensor(GeelyBaseSensor):
     @property
     def native_value(self) -> int | None:
         """Return the combined range (electric + fuel)."""
+        basic_status = self.vehicle_status.get("basicVehicleStatus", {})
+        electric = basic_status.get("distanceToEmptyOnBatteryOnly")
+        fuel = basic_status.get("distanceToEmpty")
+        if electric is not None and fuel is not None:
+            return int(electric) + int(fuel)
+        return None
+
+
+class GeelyFuelRangeSensor(GeelyBaseSensor):
+    """Sensor for fuel-only range (PHEV)."""
+
+    _attr_name = "油量续航"
+    _attr_native_unit_of_measurement = UnitOfLength.KILOMETERS
+    _attr_device_class = SensorDeviceClass.DISTANCE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:gas-station"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_fuel_range"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the fuel-only range."""
         basic_status = self.vehicle_status.get("basicVehicleStatus", {})
         range_value = basic_status.get("distanceToEmpty")
         if range_value is not None:
