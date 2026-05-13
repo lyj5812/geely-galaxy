@@ -14,6 +14,7 @@ import random
 import string
 import time
 from typing import Any
+from collections.abc import Callable
 from datetime import datetime, timezone
 import aiohttp
 
@@ -91,6 +92,9 @@ class GeelyGalaxyApi:
         self._own_session = False
         self._vehicle_info: dict = {}
         self._piling_code: str | None = None  # 缓存充电桩编码
+        # refresh token 更新回调（供 __init__.py 注册，立即持久化）
+        self._on_refresh_token_updated: Callable[[str], None] | None = None
+        self._refresh_token_renew_attempted: float = 0  # 上次主动续期尝试时间
         # XCHANGER 状态（geely2/L7 车型）
         self._xchanger_jwt: str | None = None
         self._xchanger_jwt_expire_at: float = 0
@@ -365,14 +369,20 @@ class GeelyGalaxyApi:
         url = f"https://{API_HOSTS['user']}{path}"
         headers = self._build_get_headers(APP_KEYS["user"], path)
 
-        _LOGGER.debug("Calling refresh_access_token: %s", url)
+        _LOGGER.info(
+            "开始刷新 AccessToken (refreshToken 前8位: %s...)",
+            self._refresh_token[:8] if self._refresh_token else "空",
+        )
         try:
             async with session.get(url, headers=headers) as response:
                 response_text = await response.text()
                 _LOGGER.debug("Refresh token response: %s", response_text)
 
                 if response.status != 200:
-                    _LOGGER.error("Refresh token HTTP %s: %s", response.status, response_text[:500])
+                    _LOGGER.error(
+                        "刷新 Token 失败: HTTP %s, 响应: %s",
+                        response.status, response_text[:500],
+                    )
                     raise GeelyAuthError(
                         f"Failed to refresh token: HTTP {response.status}"
                     )
@@ -381,9 +391,13 @@ class GeelyGalaxyApi:
                 code = data.get("code")
 
                 if code not in ("success", 0, "0"):
-                    _LOGGER.error("Refresh token failed: %s", response_text[:500])
+                    msg = data.get("msg", data.get("message", "Unknown error"))
+                    _LOGGER.error(
+                        "刷新 Token 业务错误: code=%s, msg=%s, 完整响应: %s",
+                        code, msg, response_text[:500],
+                    )
                     raise GeelyAuthError(
-                        f"Token refresh failed (code={code}): {data.get('msg', data.get('message', 'Unknown error'))}"
+                        f"Token refresh failed (code={code}): {msg}"
                     )
 
                 token_data = data.get("data", {}).get("centerTokenDto", {})
@@ -394,39 +408,64 @@ class GeelyGalaxyApi:
                 if expire_at:
                     # expireAt 是毫秒时间戳
                     self._token_expire_at = expire_at / 1000
-                    _LOGGER.debug(
-                        "Token 将在 %s 过期",
+                    _LOGGER.info(
+                        "AccessToken 刷新成功，过期时间: %s",
                         datetime.fromtimestamp(self._token_expire_at).isoformat(),
                     )
                 else:
                     # 没有过期时间信息，默认 1.5 小时后过期
                     self._token_expire_at = time.time() + 5400
+                    _LOGGER.warning("响应中无 expireAt 字段，默认 1.5 小时后过期")
 
                 # 更新 refresh token（如果返回了新的）
                 new_refresh_token = token_data.get("refreshToken")
-                if new_refresh_token:
+                if new_refresh_token and new_refresh_token != self._refresh_token:
+                    old_prefix = self._refresh_token[:8] if self._refresh_token else "空"
                     self._refresh_token = new_refresh_token
+                    _LOGGER.info(
+                        "RefreshToken 已滚动续期 (%s... → %s...)",
+                        old_prefix, new_refresh_token[:8],
+                    )
+                    if self._on_refresh_token_updated:
+                        self._on_refresh_token_updated(new_refresh_token)
+                elif new_refresh_token:
+                    _LOGGER.debug("服务端返回的 refreshToken 与当前相同，无需更新")
+                else:
+                    _LOGGER.warning("服务端未返回新的 refreshToken，当前 token 未续期")
 
                 # 记录 refresh token 过期时间
                 refresh_expire_at = token_data.get("refreshExpireAt")
                 if refresh_expire_at:
                     self._refresh_token_expire_at = refresh_expire_at / 1000
                     remaining_days = (self._refresh_token_expire_at - time.time()) / 86400
-                    if remaining_days < 7:
+                    _LOGGER.info(
+                        "RefreshToken 剩余有效期: %.1f 天 (过期时间: %s)",
+                        remaining_days,
+                        datetime.fromtimestamp(self._refresh_token_expire_at).isoformat(),
+                    )
+                    if remaining_days < 3:
+                        _LOGGER.error(
+                            "RefreshToken 即将过期（剩余 %.1f 天）！如续期失败将需要重新登录",
+                            remaining_days,
+                        )
+                    elif remaining_days < 7:
                         _LOGGER.warning(
-                            "RefreshToken 将在 %.1f 天后过期，届时需要重新登录",
+                            "RefreshToken 将在 %.1f 天后过期，请关注续期状态",
                             remaining_days,
                         )
                     elif remaining_days < 0:
                         _LOGGER.error("RefreshToken 已过期！请重新配置集成以重新登录")
+                else:
+                    _LOGGER.warning("响应中无 refreshExpireAt 字段，无法判断 refreshToken 有效期")
 
                 if not self._token:
+                    _LOGGER.error("刷新响应中无 token 字段，centerTokenDto: %s", token_data)
                     raise GeelyAuthError("No token in response")
 
-                _LOGGER.info("Token refreshed successfully")
                 return self._token
 
         except aiohttp.ClientError as err:
+            _LOGGER.error("刷新 Token 网络错误: %s", err)
             raise GeelyApiError(f"Connection error: {err}") from err
 
     def _is_token_expired(self) -> bool:
@@ -440,6 +479,20 @@ class GeelyGalaxyApi:
         """确保有有效的 access token，过期则自动刷新。"""
         if self._is_token_expired():
             _LOGGER.info("Token 已过期或即将过期，自动刷新...")
+            await self.refresh_access_token()
+        # refresh token 剩余不足 3 天时主动再刷新一次，促使服务端返回新 refresh token
+        # 每 6 小时最多尝试一次，避免频繁请求
+        if (
+            self._refresh_token_expire_at > 0
+            and time.time() >= (self._refresh_token_expire_at - 259200)
+            and time.time() - self._refresh_token_renew_attempted > 21600
+        ):
+            self._refresh_token_renew_attempted = time.time()
+            remaining_hours = (self._refresh_token_expire_at - time.time()) / 3600
+            _LOGGER.warning(
+                "RefreshToken 即将过期（剩余 %.1f 小时），尝试主动续期...",
+                remaining_hours,
+            )
             await self.refresh_access_token()
 
     @staticmethod

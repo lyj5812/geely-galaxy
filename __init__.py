@@ -40,30 +40,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device_sn=entry.data[CONF_DEVICE_SN],
     )
 
+    # 注册 refresh token 更新回调：一旦服务端返回新 token 立即持久化
+    def _on_refresh_token_updated(new_token: str) -> None:
+        new_data = {**entry.data, CONF_REFRESH_TOKEN: new_token}
+        hass.config_entries.async_update_entry(entry, data=new_data)
+        _LOGGER.info("已即时保存新的 refreshToken 到配置")
+
+    api._on_refresh_token_updated = _on_refresh_token_updated
+
     # 缓存车辆信息，避免每次更新都调用 get_vehicle_list
     cached_vin: str | None = None
     cached_vehicle_info: dict = {}
-
-    # 记录初始 refresh_token，用于检测是否需要持久化新 token
-    last_saved_refresh_token = entry.data.get(CONF_REFRESH_TOKEN, "")
 
     # 充电桩分页：piling_code -> 当前页码
     charger_pages: dict[str, int] = {}
 
     async def async_update_data():
         """Fetch data from API."""
-        nonlocal cached_vin, cached_vehicle_info, last_saved_refresh_token
+        nonlocal cached_vin, cached_vehicle_info
         try:
-            # 检查 refresh_token 是否已更新，若有变化则持久化到配置
-            current_refresh_token = api._refresh_token
-            if (
-                current_refresh_token
-                and current_refresh_token != last_saved_refresh_token
-            ):
-                new_data = {**entry.data, CONF_REFRESH_TOKEN: current_refresh_token}
-                hass.config_entries.async_update_entry(entry, data=new_data)
-                last_saved_refresh_token = current_refresh_token
-                _LOGGER.info("已自动保存新的 refreshToken 到配置")
 
             # 只在首次或缓存为空时获取车辆列表
             if not cached_vin:
