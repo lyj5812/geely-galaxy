@@ -112,6 +112,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except GeelyApiError:
                 pass
 
+            # 获取签到状态
+            sign_state = {}
+            await asyncio.sleep(1)
+            try:
+                signed = await api.get_sign_state()
+                sign_state = {"signed": signed}
+            except GeelyApiError as err:
+                _LOGGER.warning("获取签到状态失败: %s", err)
+
             # 获取所有家用充电桩数据
             home_charger_list = []
             home_chargers = {}  # 按 pilingsCode 索引的充电桩数据
@@ -209,6 +218,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "last_soc": last_soc,
                 "charge_records": charge_records,
                 "reservation_info": reservation_info,
+                "sign_state": sign_state,
                 "home_charger_list": home_charger_list,
                 "home_chargers": home_chargers,
                 # 向后兼容字段（主充电桩）

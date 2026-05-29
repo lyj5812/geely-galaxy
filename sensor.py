@@ -46,6 +46,8 @@ async def async_setup_entry(
         # 基础信息
         GeelyVehicleModelSensor(coordinator, entry),
         GeelyVinSensor(coordinator, entry),
+        # 签到
+        GeelySignStateSensor(coordinator, entry),
         # 电池和续航
         GeelyBatteryLevelSensor(coordinator, entry),
         GeelyRangeSensor(coordinator, entry),
@@ -207,6 +209,38 @@ class GeelyBaseSensor(CoordinatorEntity, SensorEntity):
         if not self.coordinator.data:
             return []
         return self.coordinator.data.get("home_charger_records", [])
+
+    @property
+    def sign_state(self) -> dict[str, Any]:
+        """Get sign state from coordinator data."""
+        if not self.coordinator.data:
+            return {}
+        return self.coordinator.data.get("sign_state", {})
+
+
+class GeelySignStateSensor(GeelyBaseSensor):
+    """Sensor for daily sign-in state."""
+
+    _attr_name = "签到状态"
+    _attr_icon = "mdi:calendar-check"
+
+    def __init__(self, coordinator: DataUpdateCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_sign_state"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return sign state: 已签到 / 未签到 / 未知"""
+        sign_data = self.sign_state
+        if not sign_data:
+            return "未知"
+        signed = sign_data.get("signed")
+        if signed is True:
+            return "已签到"
+        elif signed is False:
+            return "未签到"
+        return "未知"
 
 
 class GeelyVehicleModelSensor(GeelyBaseSensor):

@@ -49,6 +49,8 @@ async def async_setup_entry(
             HomeChargerStopButton(coordinator, entry, api),
         ])
 
+    entities.append(GeelySignInButton(coordinator, entry, api))
+
     async_add_entities(entities)
 
 
@@ -302,8 +304,6 @@ class GeelyPurifierOffButton(GeelyBaseButton):
             _LOGGER.error("关闭空气净化失败: %s", err)
 
 
-# ========== 家用充电桩按钮 ==========
-
 class HomeChargerBaseButton(CoordinatorEntity, ButtonEntity):
     """Base class for home charger buttons."""
 
@@ -377,3 +377,27 @@ class HomeChargerStopButton(HomeChargerBaseButton):
             await self.coordinator.async_request_refresh()
         except Exception as err:
             _LOGGER.error("停止充电失败: %s", err)
+
+
+# ========== 签到按钮 ==========
+
+class GeelySignInButton(GeelyBaseButton):
+    """Button to sign in."""
+
+    _attr_name = "每日签到"
+    _attr_icon = "mdi:calendar-check"
+
+    def __init__(self, coordinator, entry, api) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry, api)
+        self._attr_unique_id = f"{entry.entry_id}_btn_sign_in"
+
+    async def async_press(self) -> None:
+        """Perform sign-in."""
+        try:
+            result = await self._api.do_sign()
+            _LOGGER.info("签到成功: %s", result)
+            # 刷新 coordinator 更新签到状态
+            await self.coordinator.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error("签到失败: %s", err)

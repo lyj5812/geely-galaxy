@@ -38,12 +38,17 @@ API_HOSTS = {
     "recharge": "api-recharge.geely.com",  # 充电桩服务
 }
 
+# 签到 API AppKey
+APP_KEYS_SIGN = "204453306"
+SIGN_SECRET = "uUwSi6m9m8Nx3Grx7dQghyxMpOXJKDGu"
+
 # AppKey 配置
 APP_KEYS = {
     "user": "204179735",  # 用户API
     "app": "204167276",   # H5端应用API
     "vc": "204373120",    # 车辆控制API
     "recharge": "204195485",  # 充电桩服务 API
+    "sign": APP_KEYS_SIGN,    # 签到 API
 }
 
 # 充电服务配置
@@ -1729,3 +1734,95 @@ class GeelyGalaxyApi:
     def piling_code(self) -> str | None:
         """Get cached piling code."""
         return self._piling_code
+
+    # ========== 签到相关 ==========
+
+    def _build_sign_headers(self, path: str, body: str = "") -> dict[str, str]:
+        """构建签到 API 请求头（与 JS getGetHeader/getPostHeader 一致）。"""
+        date, timestamp = self._format_date_and_timestamp()
+        nonce = self._generate_uuid()
+        content_md5 = self._calculate_content_md5(body) if body else ""
+
+        signature = self._calculate_signature(
+            method="GET" if not body else "POST",
+            accept="application/json; charset=utf-8",
+            content_md5=content_md5,
+            content_type="application/json; charset=utf-8",
+            date=date,
+            app_key=APP_KEYS_SIGN,
+            nonce=nonce,
+            timestamp=timestamp,
+            path=path,
+        )
+
+        headers = {
+            "date": date,
+            "x-ca-signature": signature,
+            "x-ca-nonce": nonce,
+            "x-ca-key": APP_KEYS_SIGN,
+            "ca_version": "1",
+            "accept": "application/json; charset=utf-8",
+            "usetoken": "1",
+            "x-ca-timestamp": timestamp,
+            "x-ca-signature-headers": "x-ca-nonce,x-ca-timestamp,x-ca-key",
+            "x-refresh-token": "true",
+            "content-type": "application/json; charset=utf-8",
+            "user-agent": "ALIYUN-ANDROID-UA",
+            "deviceSN": self._device_sn,
+            "appId": "galaxy-app",
+            "appVersion": "1.46.0",
+            "platform": "Android",
+            "Cache-Control": "no-cache",
+        }
+        if self._token:
+            headers["token"] = self._token
+        return headers
+
+    async def get_sign_state(self) -> bool:
+        """查询今日签到状态。返回 True=已签到，False=未签到。"""
+        await self._ensure_token()
+        session = await self._ensure_session()
+        path = "/app/v1/sign/state"
+        url = f"https://{API_HOSTS['app']}{path}"
+        headers = self._build_sign_headers(path)
+
+        _LOGGER.debug("查询签到状态: %s", url)
+        async with session.get(url, headers=headers) as response:
+            response_text = await response.text()
+            _LOGGER.debug("签到状态响应: %s", response_text[:300])
+
+            if response.status != 200:
+                raise GeelyApiError(f"签到状态查询失败: HTTP {response.status}")
+
+            data = json.loads(response_text)
+            code = data.get("code")
+            if code not in (0, "0", "success"):
+                raise GeelyApiError(f"签到状态查询失败: code={code} msg={data.get('msg', data.get('message', response_text[:200]))}")
+
+            # data 为 true=已签到，false=未签到
+            return data.get("data") is True
+
+    async def do_sign(self) -> dict[str, Any]:
+        """执行签到。签到成功返回结果，失败抛出异常。"""
+        await self._ensure_token()
+        session = await self._ensure_session()
+        path = "/app/v1/sign/add"
+        url = f"https://{API_HOSTS['app']}{path}"
+        body_dict = {"signType": 0}
+        body = json.dumps(body_dict, separators=(",", ":"))
+        headers = self._build_sign_headers(path, body)
+
+        _LOGGER.debug("执行签到: %s body=%s", url, body)
+        async with session.post(url, data=body, headers=headers) as response:
+            response_text = await response.text()
+            _LOGGER.debug("签到响应: %s", response_text[:300])
+
+            if response.status != 200:
+                raise GeelyApiError(f"签到失败: HTTP {response.status}")
+
+            data = json.loads(response_text)
+            code = data.get("code")
+            if code not in (0, "0", "success"):
+                raise GeelyApiError(f"签到失败: code={code} msg={data.get('msg', data.get('message', response_text[:200]))}")
+
+            return data
