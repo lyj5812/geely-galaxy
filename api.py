@@ -1769,11 +1769,27 @@ class GeelyGalaxyApi:
             "content-type": "application/json; charset=utf-8",
             "user-agent": "ALIYUN-ANDROID-UA",
             "deviceSN": self._device_sn,
+            "txCookie": "",
             "appId": "galaxy-app",
             "appVersion": "1.46.0",
             "platform": "Android",
             "Cache-Control": "no-cache",
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "gzip",
+            "sweet_security_info": '{"appVersion":"1.46.0","platform":"android"}',
+            "methodtype": "6",
+            "contenttype": "application/json",
+            "gl_dev_id": self._device_sn,
+            "gl_dev_model": "HomeAssistant",
+            "gl_dev_brand": "HomeAssistant",
+            "gl_dev_platform": "android",
+            "gl_app_version": "1.46.0",
+            "gl_os_version": "33",
+            "gl_app_build": "146000098",
         }
+        # POST 请求必须包含 content-md5 头
+        if body:
+            headers["content-md5"] = content_md5
         if self._token:
             headers["token"] = self._token
         return headers
@@ -1786,21 +1802,27 @@ class GeelyGalaxyApi:
         url = f"https://{API_HOSTS['app']}{path}"
         headers = self._build_sign_headers(path)
 
-        _LOGGER.debug("查询签到状态: %s", url)
+        _LOGGER.warning("[签到API] 查询签到状态: %s", url)
+        _LOGGER.warning("[签到API] 请求头: %s", json.dumps(headers, indent=2, ensure_ascii=False))
         async with session.get(url, headers=headers) as response:
             response_text = await response.text()
-            _LOGGER.debug("签到状态响应: %s", response_text[:300])
+            _LOGGER.warning("[签到API] 响应状态: %d", response.status)
+            _LOGGER.warning("[签到API] 响应体: %s", response_text[:500])
 
             if response.status != 200:
                 raise GeelyApiError(f"签到状态查询失败: HTTP {response.status}")
 
             data = json.loads(response_text)
             code = data.get("code")
+            msg = data.get("msg", data.get("message", ""))
+            _LOGGER.warning("[签到API] code=%s, msg=%s", code, msg)
             if code not in (0, "0", "success"):
-                raise GeelyApiError(f"签到状态查询失败: code={code} msg={data.get('msg', data.get('message', response_text[:200]))}")
+                raise GeelyApiError(f"签到状态查询失败: code={code} msg={msg}")
 
             # data 为 true=已签到，false=未签到
-            return data.get("data") is True
+            signed = data.get("data") is True
+            _LOGGER.warning("[签到API] 签到状态: %s", "已签到" if signed else "未签到")
+            return signed
 
     async def do_sign(self) -> dict[str, Any]:
         """执行签到。签到成功返回结果，失败抛出异常。"""
@@ -1812,17 +1834,23 @@ class GeelyGalaxyApi:
         body = json.dumps(body_dict, separators=(",", ":"))
         headers = self._build_sign_headers(path, body)
 
-        _LOGGER.debug("执行签到: %s body=%s", url, body)
+        _LOGGER.warning("[签到API] 执行签到: %s", url)
+        _LOGGER.warning("[签到API] 请求体: %s", body)
+        _LOGGER.warning("[签到API] 请求头: %s", json.dumps(headers, indent=2, ensure_ascii=False))
         async with session.post(url, data=body, headers=headers) as response:
             response_text = await response.text()
-            _LOGGER.debug("签到响应: %s", response_text[:300])
+            _LOGGER.warning("[签到API] 响应状态: %d", response.status)
+            _LOGGER.warning("[签到API] 响应体: %s", response_text[:500])
 
             if response.status != 200:
                 raise GeelyApiError(f"签到失败: HTTP {response.status}")
 
             data = json.loads(response_text)
             code = data.get("code")
+            msg = data.get("msg", data.get("message", ""))
+            _LOGGER.warning("[签到API] code=%s, msg=%s", code, msg)
             if code not in (0, "0", "success"):
-                raise GeelyApiError(f"签到失败: code={code} msg={data.get('msg', data.get('message', response_text[:200]))}")
+                raise GeelyApiError(f"签到失败: code={code} msg={msg}")
 
+            _LOGGER.warning("[签到API] 签到成功! data=%s", data.get("data"))
             return data
