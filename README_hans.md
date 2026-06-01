@@ -1,65 +1,65 @@
-# 吉利银河 Home Assistant 集成
+# Geely Galaxy Home Assistant Integration
 
-支持吉利银河车辆的 Home Assistant 自定义集成，提供：
+A Home Assistant custom integration for Geely Galaxy vehicles, featuring:
 
-- 车辆状态监控（电量、里程、胎压等）
-- 远程控制（锁车、车窗、空调）
-- 家桩充电管理
-- 每日签到积分
+- Vehicle status monitoring (battery, mileage, tire pressure, etc.)
+- Remote control (lock/unlock, windows, climate)
+- Home charger management
+- Daily sign-in for points
 
-## 支持车型
+## Supported Vehicles
 
-- 吉利银河 L7
-- 吉利银河（geely2 平台）
+- Geely Galaxy L7
+- Geely Galaxy (geely2 platform)
 
-## 安装
+## Installation
 
-### 通过 HACS（推荐）
+### Via HACS (Recommended)
 
-1. 确保已安装 [HACS](https://hacs.xyz/)
-2. 进入 HACS → 集成 → 浏览并下载存储库
-3. 搜索 "Geely Galaxy" 并安装
-4. 重启 Home Assistant
+1. Ensure [HACS](https://hacs.xyz/) is installed
+2. Go to HACS → Integrations → Explore & Download Repositories
+3. Search for "Geely Galaxy" and install
+4. Restart Home Assistant
 
-### 手动安装
+### Manual Installation
 
-1. 将 `custom_components/geely_galaxy/` 复制到 Home Assistant 的 `custom_components/` 文件夹
-2. 重启 Home Assistant
+1. Copy `custom_components/geely_galaxy/` to your Home Assistant's `custom_components/` folder
+2. Restart Home Assistant
 
-## 配置
+## Configuration
 
-进入 **设置 → 设备与服务 → 添加集成**，搜索"吉利银河"。
+Go to **Settings → Devices & Services → Add Integration** and search for "Geely Galaxy".
 
-### 登录方式
+### Login Methods
 
-1. **短信验证码（推荐）** - 输入手机号，完成验证
-2. **Token 登录** - 输入从抓包获取的 refresh_token 和 device_sn
-3. **密码登录** - 输入 SM4 加密后的密码
+1. **SMS Verification (Recommended)** - Enter phone number, complete verification
+2. **Token Login** - Enter refresh_token and device_sn from packet capture
+3. **Password Login** - Enter SM4-encrypted password
 
-## 实体
+## Entities
 
-### 传感器
-- 车辆状态（电量、里程、胎压等）
-- 签到状态
-- 充电桩状态和记录
+### Sensors
+- Vehicle status (battery, mileage, tire pressure, etc.)
+- Sign-in status
+- Charger status and records
 
-### 按钮
-- 每日签到
-- 车辆控制（车窗、空调等）
+### Buttons
+- Daily sign-in
+- Vehicle control (windows, climate, etc.)
 
-### 开关
-- 车辆控制
+### Switches
+- Vehicle controls
 
-## 问题排查
+## Troubleshooting
 
-遇到问题请检查：
-1. Home Assistant 日志（设置 → 系统 → 日志）
-2. [提交 Issue](https://github.com/lyj5812/geely-galaxy/issues)
+For issues, please check:
+1. Home Assistant log (`Settings → System → Logs`)
+2. [Submit an Issue](https://github.com/lyj5812/geely-galaxy/issues)
 
-## 开发说明
+## Development
 
-本集成基于对吉利银河 APP API 的逆向分析。
+This integration is based on reverse engineering of the Geely Galaxy app API.
 
-## 许可证
+## License
 
-MIT 许可证
+MIT License
