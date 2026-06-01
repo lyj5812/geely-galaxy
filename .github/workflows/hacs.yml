@@ -1,0 +1,12 @@
+name: hacs
+outputs:
+  validation:
+    description: Validation result
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+    - name: HACS validation
+      uses: hacs/action@main
+      with:
+        category: integration
