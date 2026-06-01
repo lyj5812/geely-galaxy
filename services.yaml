@@ -1,0 +1,57 @@
+query_charger_records:
+  name: 查询充电桩充电记录
+  description: 实时查询家用充电桩的充电记录，支持分页
+  fields:
+    piling_code:
+      name: 充电桩编码
+      description: 充电桩的 pilingsCode，留空则查询所有充电桩
+      required: false
+      example: "70100418531"
+      selector:
+        text:
+    page:
+      name: 页码
+      description: 查询的页码，从 1 开始
+      required: false
+      default: 1
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
+    page_size:
+      name: 每页条数
+      description: 每页返回的记录条数
+      required: false
+      default: 20
+      example: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
+
+charger_next_page:
+  name: 充电记录下一页
+  description: 翻到指定充电桩的下一页充电记录
+  fields:
+    piling_code:
+      name: 充电桩编码
+      description: 充电桩的 pilingsCode
+      required: true
+      example: "70100418531"
+      selector:
+        text:
+
+charger_prev_page:
+  name: 充电记录上一页
+  description: 翻到指定充电桩的上一页充电记录
+  fields:
+    piling_code:
+      name: 充电桩编码
+      description: 充电桩的 pilingsCode
+      required: true
+      example: "70100418531"
+      selector:
+        text:
