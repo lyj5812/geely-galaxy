@@ -195,6 +195,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._captcha_data = captcha_data
             return self.async_external_step_done(next_step_id="sms_code")
 
+        # 短暂延迟确保视图注册完成，避免首次点击失败
+        import asyncio
+        await asyncio.sleep(0.1)
+
         return self.async_external_step(
             step_id="sms_captcha",
             url=f"/api/geely_galaxy/captcha?flow_id={self.flow_id}",
