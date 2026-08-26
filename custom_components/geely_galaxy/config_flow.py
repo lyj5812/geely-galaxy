@@ -120,6 +120,47 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Check if this flow is a reauth flow."""
         return self.context.get("source") == config_entries.SOURCE_REAUTH
 
+    def _captcha_url(self, flow_id: str) -> str:
+        """构造验证码页面的绝对 URL（external step 要求绝对地址）。
+
+        优先使用用户显式配置的 external/internal URL；未配置时动态
+        获取 HA 主机的局域网 IP 兜底。全程容错，避免探测异常导致流程卡死。
+        """
+        base: str | None = None
+        try:
+            base = (
+                self.hass.config.get("external_url")
+                or self.hass.config.get("internal_url")
+            )
+        except Exception:  # noqa: BLE001 - 兜底，任何异常都回退到动态探测
+            base = None
+
+        if not base:
+            ip = "127.0.0.1"
+            try:
+                ip = self._local_ip()
+            except Exception:  # noqa: BLE001
+                pass
+            port = getattr(self.hass.config, "api_port", None) or 8123
+            base = f"http://{ip}:{port}"
+
+        return f"{base}/api/geely_galaxy/captcha?flow_id={flow_id}"
+
+    @staticmethod
+    def _local_ip() -> str:
+        """获取 HA 主机的局域网 IP（用于未配置 URL 时兜底）。"""
+        import socket
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # UDP connect 不实际发包，仅让内核选择默认路由对应的本机地址
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+        finally:
+            sock.close()
+
     def _finish_login(self, title: str, data: dict[str, Any]) -> FlowResult:
         """Finish login: update existing entry (reauth) or create new entry."""
         if self._is_reauth:
@@ -201,7 +242,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_external_step(
             step_id="sms_captcha",
-            url=f"/api/geely_galaxy/captcha?flow_id={self.flow_id}",
+            url=self._captcha_url(self.flow_id),
         )
 
     async def async_step_sms_code(
@@ -339,7 +380,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_external_step(
             step_id="captcha",
-            url=f"/api/geely_galaxy/captcha?flow_id={self.flow_id}",
+            url=self._captcha_url(self.flow_id),
         )
 
     async def async_step_pwd_login(
