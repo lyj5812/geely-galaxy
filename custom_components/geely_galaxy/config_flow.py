@@ -120,6 +120,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Check if this flow is a reauth flow."""
         return self.context.get("source") == config_entries.SOURCE_REAUTH
 
+    def _captcha_url(self, flow_id: str) -> str:
+        """构造验证码页面的绝对 URL（external step 要求绝对地址）。"""
+        base = self.hass.config.external_url or self.hass.config.internal_url
+        if base is None:
+            base = "http://localhost:8123"
+        return f"{base}/api/geely_galaxy/captcha?flow_id={flow_id}"
+
     def _finish_login(self, title: str, data: dict[str, Any]) -> FlowResult:
         """Finish login: update existing entry (reauth) or create new entry."""
         if self._is_reauth:
@@ -201,7 +208,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_external_step(
             step_id="sms_captcha",
-            url=f"/api/geely_galaxy/captcha?flow_id={self.flow_id}",
+            url=self._captcha_url(self.flow_id),
         )
 
     async def async_step_sms_code(
@@ -339,7 +346,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_external_step(
             step_id="captcha",
-            url=f"/api/geely_galaxy/captcha?flow_id={self.flow_id}",
+            url=self._captcha_url(self.flow_id),
         )
 
     async def async_step_pwd_login(
