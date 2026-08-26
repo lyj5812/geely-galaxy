@@ -178,6 +178,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle the initial step: choose login method."""
+        # 提前注册验证码视图，避免首次点击登录时才注册导致流程报错
+        ensure_captcha_views(self.hass)
+
         if user_input is not None:
             method = user_input.get(CONF_LOGIN_METHOD)
             if method == LOGIN_METHOD_SMS:

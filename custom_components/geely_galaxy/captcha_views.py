@@ -247,14 +247,26 @@ def _rewrite_geetest_body(
 
 
 def ensure_captcha_views(hass: HomeAssistant) -> None:
-    """注册验证码相关 HTTP 视图（仅首次调用时注册）。"""
+    """注册验证码相关 HTTP 视图（仅首次调用时注册）。
+
+    逐个注册并容错：单个视图注册失败只记日志、不阻断流程；
+    注册标记在所有视图都尝试过之后才置位，避免首次失败后
+    被误判为已注册。
+    """
     domain_data = hass.data.setdefault(DOMAIN, {})
-    if not domain_data.get("captcha_view_registered"):
-        domain_data["captcha_results"] = {}
-        domain_data["captcha_view_registered"] = True
-        hass.http.register_view(GeelyCaptchaPageView())
-        hass.http.register_view(GeelyCaptchaCallbackView())
-        hass.http.register_view(GeeTestProxyView())
+    if domain_data.get("captcha_view_registered"):
+        return
+    domain_data["captcha_results"] = {}
+    for view in (
+        GeelyCaptchaPageView(),
+        GeelyCaptchaCallbackView(),
+        GeeTestProxyView(),
+    ):
+        try:
+            hass.http.register_view(view)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("注册验证码视图 %s 失败: %s", view.url, err)
+    domain_data["captcha_view_registered"] = True
 
 
 # ==================== 内嵌 HTML 页面 ====================
