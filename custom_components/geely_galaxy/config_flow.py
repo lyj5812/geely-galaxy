@@ -123,10 +123,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _captcha_url(self, flow_id: str) -> str:
         """构造验证码页面的绝对 URL（external step 要求绝对地址）。
 
-        优先使用用户配置的 external/internal URL；都未配置时
-        动态获取 HA 主机的局域网 IP 兜底，避免 localhost 不可达。
+        优先使用用户显式配置的 external/internal URL；
+        未配置（get 返回 None）时动态获取 HA 主机的局域网 IP 兜底，
+        避免 localhost/默认主机名在其它设备上不可达。
         """
-        base = self.hass.config.external_url or self.hass.config.internal_url
+        base = self.hass.config.get("external_url") or self.hass.config.get(
+            "internal_url"
+        )
         if base is None:
             base = f"http://{self._local_ip()}:{self.hass.config.api_port or 8123}"
         return f"{base}/api/geely_galaxy/captcha?flow_id={flow_id}"
